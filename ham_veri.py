@@ -656,13 +656,7 @@ else:
     example_df = pd.DataFrame(example_data)
     st.dataframe(example_df, use_container_width=True)
     
-    st.markdown("""
-    **Dosya Formatı Açıklaması:**
-    - **Tesisat Numarası**: Her tesisatın benzersiz kimlik numarası
-    - **Bina Numarası**: Tesisatın bulunduğu binanın numarası
-    - **Tarih Sütunları**: YYYY/M formatında (örn: 2024/1, 2024/2, ...)
-    - **Tüketim Değerleri**: Aylık doğalgaz tüketimi (m³)
-    """)
+    
 
 # Bilgi paneli
 st.sidebar.markdown("---")
