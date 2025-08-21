@@ -575,11 +575,115 @@ if uploaded_file is not None:
                         st.success("🎉 Şüpheli tesisat bulunamadı!")
                     
                     # Tüm sonuçlar
-                    st.subheader("📋 Tüm Sonuçlar")
+                st.subheader("📋 Tüm Sonuçlar")
+                
+                # Filtreleme seçenekleri
+                filter_col1, filter_col2 = st.columns(2)
+                
+                with filter_col1:
+                    suspicion_filter = st.selectbox(
+                        "Şüpheli Durumu",
+                        options=['Tümü', 'Şüpheli', 'Normal'],
+                        index=0
+                    )
+                
+                with filter_col2:
+                    bina_filter = st.selectbox(
+                        "Bina Numarası",
+                        options=['Tümü'] + sorted(results_df['bina_no'].unique().tolist()),
+                        index=0
+                    )
+                
+                # Filtreleme uygula
+                filtered_df = results_df.copy()
+                
+                if suspicion_filter != 'Tümü':
+                    filtered_df = filtered_df[filtered_df['suspicion_level'] == suspicion_filter]
+                
+                if bina_filter != 'Tümü':
+                    filtered_df = filtered_df[filtered_df['bina_no'] == bina_filter]
+                
+                # Sonuçları göster
+                if not filtered_df.empty:
+                    display_cols = ['tesisat_no', 'bina_no', 'kis_tuketim', 'yaz_tuketim', 
+                                   'ortalama_tuketim', 'kis_trend', 'suspicion_level', 'anomaliler']
                     
-                    # Filtreleme seçenekleri
-                    filter_col1, filter_col2 = st.columns(2)
+                    filtered_display = filtered_df[display_cols].copy()
+                    filtered_display.columns = ['Tesisat No', 'Bina No', 'Kış Tüketim', 
+                                              'Yaz Tüketim', 'Ortalama Tüketim', 'Kış Trend',
+                                              'Durum', 'Anomaliler']
                     
-                    with filter_col1:
-                        suspicion_filter = st.selectbox(
-                            "Şü
+                    # Numeric columns için formatting
+                    for col in ['Kış Tüketim', 'Yaz Tüketim', 'Ortalama Tüketim']:
+                        filtered_display[col] = filtered_display[col].round(1)
+                    
+                    st.dataframe(
+                        filtered_display,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    
+                    # Tüm sonuçları Excel olarak indirme
+                    buffer_all = BytesIO()
+                    with pd.ExcelWriter(buffer_all, engine='openpyxl') as writer:
+                        filtered_display.to_excel(writer, index=False, sheet_name='Tüm Sonuçlar')
+                    
+                    st.download_button(
+                        label="📥 Filtrelenmiş Sonuçları İndir (Excel)",
+                        data=buffer_all.getvalue(),
+                        file_name="dogalgaz_analiz_sonuclari.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.warning("Filtreye uygun veri bulunamadı.")
+
+else:
+    st.info("👈 Lütfen sol panelden bir dosya yükleyin")
+    
+    # Örnek dosya formatı
+    st.subheader("📄 Beklenen Dosya Formatı")
+    st.write("Dosyanızda aşağıdaki sütunlar bulunmalıdır:")
+    
+    example_data = {
+        'tesisat_no': ['T001', 'T002', 'T003'],
+        'bina_no': ['B001', 'B001', 'B002'],
+        '2024/1': [120, 25, 150],
+        '2024/2': [110, 20, 140],
+        '2024/3': [80, 15, 100],
+        '2024/4': [50, 10, 60],
+        '2024/5': [30, 8, 40],
+        '2024/6': [25, 5, 35]
+    }
+    
+    example_df = pd.DataFrame(example_data)
+    st.dataframe(example_df, use_container_width=True)
+    
+    st.markdown("""
+    **Dosya Formatı Açıklaması:**
+    - **Tesisat Numarası**: Her tesisatın benzersiz kimlik numarası
+    - **Bina Numarası**: Tesisatın bulunduğu binanın numarası
+    - **Tarih Sütunları**: YYYY/M formatında (örn: 2024/1, 2024/2, ...)
+    - **Tüketim Değerleri**: Aylık doğalgaz tüketimi (m³)
+    """)
+
+# Bilgi paneli
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📋 Tespit Kriterleri")
+st.sidebar.markdown(f"""
+- **Kış Düşük Tüketim**: < {kis_tuketim_esigi} m³/ay
+- **Bina Ortalaması**: %{bina_ort_dusuk_oran} düşük
+- **Ani Düşüş**: %{ani_dusus_orani} düşüş
+- **Kış-Yaz Farkı**: Çok az fark
+- **Toplam Tüketim**: Çok düşük
+- **Sıfır Tüketim**: 6+ ay sıfır
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ℹ️ Kullanım Bilgileri")
+st.sidebar.markdown("""
+1. CSV veya Excel dosyasını yükleyin
+2. Tesisat ve bina sütunlarını seçin
+3. Parametreleri ayarlayın
+4. Analizi başlatın
+5. Sonuçları inceleyin ve Excel olarak indirin
+""")
