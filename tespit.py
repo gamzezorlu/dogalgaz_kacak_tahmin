@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# import plotly.express as px
-# import plotly.graph_objects as go
-# from plotly.subplots import make_subplots
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import warnings
 from io import BytesIO
 warnings.filterwarnings('ignore')
@@ -68,103 +68,6 @@ def load_data(file):
         st.error(f"Dosya yükleme hatası: {str(e)}")
         return None
 
-def detect_sap_format(df):
-    """SAP formatını tespit et"""
-    # SAP formatı için tipik sütun isimleri
-    sap_indicators = ['Tüketim noktası', 'Belge tarihi',  'Bağlantı nesnesi','KWH Tüketimi', 'Sm3']
-    
-    # Sütun isimlerini kontrol et
-    columns_lower = [col.lower() if isinstance(col, str) else str(col).lower() for col in df.columns]
-    sap_matches = sum(1 for indicator in sap_indicators if any(indicator.lower() in col for col in columns_lower))
-    
-    return sap_matches >= 2  # En az 2 SAP sütunu varsa SAP formatı
-
-def process_sap_data(df):
-    """SAP formatındaki veriyi pivot edip düzenle"""
-    st.info("🔄 SAP formatı tespit edildi. Veri dönüştürülüyor...")
-    
-    # Sütun eşleştirmesi
-    column_mapping = {}
-    
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if 'Tüketim' in col_lower and 'nk' in col_lower:
-            column_mapping['tesisat_no'] = col
-        elif 'Bağlantı nesnesi' in col_lower:
-            column_mapping['bina_no'] = col
-        elif 'belge' in col_lower and 'trh' in col_lower:
-            column_mapping['tarih'] = col
-        elif 'sm3' in col_lower:
-            column_mapping['tuketim'] = col  # m3 tüketimi
-    
-    # Gerekli sütunların varlığını kontrol et
-    required_fields = ['tesisat_no', 'bina_no', 'tarih', 'tuketim']
-    missing_fields = [field for field in required_fields if field not in column_mapping]
-    
-    if missing_fields:
-        st.error(f"⚠️ Gerekli sütunlar bulunamadı: {missing_fields}")
-        st.write("Mevcut sütunlar:", list(df.columns))
-        return None
-    
-    # Veriyi temizle ve hazırla
-    processed_df = df.copy()
-    
-    # Sütun isimlerini yeniden adlandır
-    rename_dict = {v: k for k, v in column_mapping.items()}
-    processed_df = processed_df.rename(columns=rename_dict)
-    
-    # Tarih sütununu düzenle
-    processed_df['tarih'] = pd.to_datetime(processed_df['tarih'], errors='coerce', dayfirst=True)
-    processed_df = processed_df.dropna(subset=['tarih'])
-    
-    # Tüketim verisini sayısal hale getir
-    processed_df['tuketim'] = pd.to_numeric(processed_df['tuketim'], errors='coerce').fillna(0)
-    
-    # Yıl ve ay sütunları ekle
-    processed_df['yil'] = processed_df['tarih'].dt.year
-    processed_df['ay'] = processed_df['tarih'].dt.month
-    
-    # Yıl/Ay formatında sütun oluştur
-    processed_df['yil_ay'] = processed_df['yil'].astype(str) + '/' + processed_df['ay'].astype(str)
-    
-    # Pivot yaparak her tesisat için aylık tüketim sütunları oluştur
-    try:
-        # Önce aynı tesisat, bina ve yıl/ay kombinasyonlarını topla
-        pivot_df = processed_df.groupby(['tesisat_no', 'bina_no', 'yil_ay'])['tuketim'].sum().reset_index()
-        
-        # Daha sonra pivot yap
-        final_df = pivot_df.pivot_table(
-            index=['tesisat_no', 'bina_no'], 
-            columns='yil_ay', 
-            values='tuketim', 
-            fill_value=0,
-            aggfunc='sum'  # Eğer hala duplikat varsa topla
-        ).reset_index()
-        
-        # Sütun isimlerini düzelt
-        final_df.columns.name = None
-        
-        # Duplikat tesisat kontrolü ve temizliği
-        if final_df['tesisat_no'].duplicated().any():
-            st.warning("⚠️ Duplikat tesisatlar tespit edildi, birleştiriliyor...")
-            
-            # Duplikat tesisatları birleştir
-            numeric_cols = [col for col in final_df.columns if col not in ['tesisat_no', 'bina_no']]
-            
-            final_df = final_df.groupby(['tesisat_no', 'bina_no'], as_index=False)[numeric_cols].sum()
-        
-        st.success(f"✅ SAP verisi başarıyla dönüştürüldü! {len(final_df)} tesisat, {len(final_df.columns)-2} aylık veri")
-        
-        # Dönüştürülmüş veri önizlemesi
-        st.subheader("🔄 Dönüştürülmüş Veri Önizleme")
-        st.dataframe(final_df.head())
-        
-        return final_df
-        
-    except Exception as e:
-        st.error(f"Pivot işlemi sırasında hata: {str(e)}")
-        return None
-
 def parse_date_columns(df):
     """Tarih sütunlarını parse et"""
     date_columns = []
@@ -198,26 +101,6 @@ def get_season(month):
 
 def analyze_consumption_patterns(df, date_columns, tesisat_col, bina_col):
     """Tüketim paternlerini analiz et"""
-    
-    # Duplikat tesisat kontrolü
-    if df[tesisat_col].duplicated().any():
-        st.warning("⚠️ Analiz öncesi duplikat tesisatlar tespit edildi, birleştiriliyor...")
-        
-        # Aynı tesisat numarasına sahip satırları birleştir
-        numeric_cols = [col for col in df.columns if col in date_columns]
-        non_numeric_cols = [col for col in df.columns if col not in date_columns]
-        
-        # Önce non-numeric sütunlar için ilk değeri al
-        df_grouped = df.groupby(tesisat_col, as_index=False)[non_numeric_cols].first()
-        
-        # Sonra numeric sütunlar için topla
-        df_numeric = df.groupby(tesisat_col, as_index=False)[numeric_cols].sum()
-        
-        # Birleştir
-        df = pd.merge(df_grouped, df_numeric, on=tesisat_col)
-        
-        st.info(f"✅ Duplikatlar birleştirildi. Toplam tesisat: {len(df)}")
-    
     results = []
     
     for idx, row in df.iterrows():
@@ -377,7 +260,76 @@ def analyze_consumption_patterns(df, date_columns, tesisat_col, bina_col):
     
     return pd.DataFrame(results)
 
-
+def create_visualizations(results_df, original_df, date_columns):
+    """Görselleştirmeler oluştur"""
+    
+    # 1. Anomali dağılımı
+    fig1 = px.histogram(
+        results_df, 
+        x='anomali_sayisi',
+        title="Anomali Sayısı Dağılımı",
+        color_discrete_sequence=['#FF6B6B']
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+    
+    # 2. Şüpheli vs Normal dağılımı
+    suspicion_counts = results_df['suspicion_level'].value_counts()
+    fig2 = px.pie(
+        values=suspicion_counts.values,
+        names=suspicion_counts.index,
+        title="Şüpheli vs Normal Tesisatlar",
+        color_discrete_map={'Şüpheli': '#FF6B6B', 'Normal': '#4ECDC4'}
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+    
+    # 3. Kış Trend Analizi
+    trend_counts = results_df['kis_trend'].value_counts()
+    fig3 = px.bar(
+        x=trend_counts.index,
+        y=trend_counts.values,
+        title="Kış Ayı Tüketim Trend Analizi",
+        color=trend_counts.values,
+        color_continuous_scale='Reds'
+    )
+    fig3.update_layout(showlegend=False)
+    st.plotly_chart(fig3, use_container_width=True)
+    
+    # 4. Kış vs Yaz tüketim karşılaştırması
+    fig4 = px.scatter(
+        results_df,
+        x='yaz_tuketim',
+        y='kis_tuketim',
+        color='suspicion_level',
+        size='anomali_sayisi',
+        title="Kış vs Yaz Tüketim Karşılaştırması",
+        labels={'yaz_tuketim': 'Yaz Tüketimi (m³)', 'kis_tuketim': 'Kış Tüketimi (m³)'},
+        color_discrete_map={'Şüpheli': '#FF6B6B', 'Normal': '#4ECDC4'},
+        hover_data=['kis_trend']
+    )
+    
+    # Normal pattern çizgisi ekle
+    max_val = max(results_df['yaz_tuketim'].max(), results_df['kis_tuketim'].max())
+    fig4.add_trace(go.Scatter(
+        x=[0, max_val],
+        y=[0, max_val],
+        mode='lines',
+        name='Eşit Tüketim Çizgisi',
+        line=dict(dash='dash', color='gray')
+    ))
+    
+    st.plotly_chart(fig4, use_container_width=True)
+    
+    # 5. Trend bazında anomali dağılımı
+    trend_anomali = results_df.groupby(['kis_trend', 'suspicion_level']).size().reset_index(name='count')
+    fig5 = px.bar(
+        trend_anomali,
+        x='kis_trend',
+        y='count',
+        color='suspicion_level',
+        title="Trend Bazında Anomali Dağılımı",
+        color_discrete_map={'Şüpheli': '#FF6B6B', 'Normal': '#4ECDC4'}
+    )
+    st.plotly_chart(fig5, use_container_width=True)
 
 # Ana uygulama
 if uploaded_file is not None:
@@ -387,15 +339,9 @@ if uploaded_file is not None:
     if df is not None:
         st.success("✅ Dosya başarıyla yüklendi!")
         
-        # SAP formatını kontrol et ve gerekirse dönüştür
-        if detect_sap_format(df):
-            df = process_sap_data(df)
-            if df is None:
-                st.stop()
-        else:
-            # Normal veri önizleme
-            st.subheader("📊 Veri Önizleme")
-            st.dataframe(df.head())
+        # Veri önizleme
+        st.subheader("📊 Veri Önizleme")
+        st.dataframe(df.head())
         
         # Sütun seçimi
         st.subheader("🔧 Sütun Seçimi")
@@ -420,8 +366,7 @@ if uploaded_file is not None:
         
         # Tarih sütunlarını göster
         st.write(f"**Tespit edilen tarih sütunları:** {len(date_columns)} adet")
-        if date_columns:
-            st.write(f"Tarih aralığı: {min(date_columns)} - {max(date_columns)}")
+        st.write(f"Tarih aralığı: {min(date_columns)} - {max(date_columns)}")
         
         # Analiz butonu
         if st.button("🔍 Anomali Analizini Başlat", type="primary"):
@@ -453,8 +398,8 @@ if uploaded_file is not None:
                     st.metric("Toplam Anomali", total_anomalies)
                 
                 # Görselleştirmeler
-                # st.subheader("📊 Görselleştirmeler")
-                # create_visualizations(results_df, df, date_columns)
+                st.subheader("📊 Görselleştirmeler")
+                create_visualizations(results_df, df, date_columns)
                 
                 # Şüpheli tesisatlar tablosu
                 st.subheader("🚨 Şüpheli Tesisatlar")
@@ -543,5 +488,67 @@ if uploaded_file is not None:
                         hide_index=True
                     )
                     
-                    # Tüm sonuçları Excel olarak indir
+                    # Tüm sonuçları Excel olarak indirme
+                    buffer_all = BytesIO()
+                    with pd.ExcelWriter(buffer_all, engine='openpyxl') as writer:
+                        filtered_display.to_excel(writer, index=False, sheet_name='Tüm Sonuçlar')
+                    
+                    st.download_button(
+                        label="📥 Filtrelenmiş Sonuçları İndir (Excel)",
+                        data=buffer_all.getvalue(),
+                        file_name="dogalgaz_analiz_sonuclari.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.warning("Filtreye uygun veri bulunamadı.")
 
+else:
+    st.info("👈 Lütfen sol panelden bir dosya yükleyin")
+    
+    # Örnek dosya formatı
+    st.subheader("📄 Beklenen Dosya Formatı")
+    st.write("Dosyanızda aşağıdaki sütunlar bulunmalıdır:")
+    
+    example_data = {
+        'tesisat_no': ['T001', 'T002', 'T003'],
+        'bina_no': ['B001', 'B001', 'B002'],
+        '2024/1': [120, 25, 150],
+        '2024/2': [110, 20, 140],
+        '2024/3': [80, 15, 100],
+        '2024/4': [50, 10, 60],
+        '2024/5': [30, 8, 40],
+        '2024/6': [25, 5, 35]
+    }
+    
+    example_df = pd.DataFrame(example_data)
+    st.dataframe(example_df, use_container_width=True)
+    
+    st.markdown("""
+    **Dosya Formatı Açıklaması:**
+    - **Tesisat Numarası**: Her tesisatın benzersiz kimlik numarası
+    - **Bina Numarası**: Tesisatın bulunduğu binanın numarası
+    - **Tarih Sütunları**: YYYY/M formatında (örn: 2024/1, 2024/2, ...)
+    - **Tüketim Değerleri**: Aylık doğalgaz tüketimi (m³)
+    """)
+
+# Bilgi paneli
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📋 Tespit Kriterleri")
+st.sidebar.markdown(f"""
+- **Kış Düşük Tüketim**: < {kis_tuketim_esigi} m³/ay
+- **Bina Ortalaması**: %{bina_ort_dusuk_oran} düşük
+- **Ani Düşüş**: %{ani_dusus_orani} düşüş
+- **Kış-Yaz Farkı**: Çok az fark
+- **Toplam Tüketim**: Çok düşük
+- **Sıfır Tüketim**: 6+ ay sıfır
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ℹ️ Kullanım Bilgileri")
+st.sidebar.markdown("""
+1. CSV veya Excel dosyasını yükleyin
+2. Tesisat ve bina sütunlarını seçin
+3. Parametreleri ayarlayın
+4. Analizi başlatın
+5. Sonuçları inceleyin ve Excel olarak indirin
+""")
