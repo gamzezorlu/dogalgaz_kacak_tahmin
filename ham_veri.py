@@ -645,10 +645,11 @@ else:
     st.write("Dosyanızda aşağıdaki sütunlar bulunmalıdır:")
     
     example_data = {
-        'tesisat_no': ['T001', 'T002', 'T003'],
-        'bina_no': ['B001', 'B001', 'B002'],
-        'Belge tarihi': [],
-        'sm3': [110, 20, 140],
+    'tesisat_no': ['T001', 'T002', 'T003'],
+    'bina_no': ['B001', 'B001', 'B002'],
+    'Belge tarihi': ['2024-01-01', '2024-01-15', '2024-02-01'],
+    'sm3': [110, 20, 140],
+
         
     }
     
