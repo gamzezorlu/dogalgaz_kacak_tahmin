@@ -69,7 +69,7 @@ def load_data(file):
         return None
 
 def detect_sap_format(df):
-    """SAP formatını tespit et"""
+
     # SAP formatı için tipik sütun isimleri
     sap_indicators = ['Tüketim noktası', 'Belge tarihi', 'KWH Tüketimi', 'Muhatap', 'Yerleşim yeri', 'Sm3']
     
@@ -88,14 +88,12 @@ def process_sap_data(df):
     
     for col in df.columns:
         col_lower = str(col).lower()
-        if 'tüketim noktası' in col_lower and 'nk' in col_lower:
+        if 'tüketim' in col_lower and 'nk' in col_lower:
             column_mapping['tesisat_no'] = col
-        elif 'bağlantı nesnesi' in col_lower:
+        elif 'bağlantı' in col_lower:
             column_mapping['bina_no'] = col
         elif 'belge' in col_lower and 'trh' in col_lower:
             column_mapping['tarih'] = col
-        elif 'kwh' in col_lower and 'tüketim' in col_lower:
-            column_mapping['tuketim'] = col
         elif 'sm3' in col_lower:
             column_mapping['tuketim'] = col  # m3 tüketimi
     
