@@ -90,7 +90,7 @@ def process_sap_data(df):
         col_lower = str(col).lower()
         if 'tüketim' in col_lower and 'nk' in col_lower:
             column_mapping['tesisat_no'] = col
-        elif 'muhatap' in col_lower:
+        elif 'bağlantı nesnesi' in col_lower:
             column_mapping['bina_no'] = col
         elif 'belge' in col_lower and 'trh' in col_lower:
             column_mapping['tarih'] = col
