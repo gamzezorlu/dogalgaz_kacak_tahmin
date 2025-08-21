@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# import plotly.express as px
-# import plotly.graph_objects as go
-# from plotly.subplots import make_subplots
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import warnings
 from io import BytesIO
 warnings.filterwarnings('ignore')
@@ -346,7 +346,76 @@ def analyze_consumption_patterns(df, date_columns, tesisat_col, bina_col):
     
     return pd.DataFrame(results)
 
-
+def create_visualizations(results_df, original_df, date_columns):
+    """Görselleştirmeler oluştur"""
+    
+    # 1. Anomali dağılımı
+    fig1 = px.histogram(
+        results_df, 
+        x='anomali_sayisi',
+        title="Anomali Sayısı Dağılımı",
+        color_discrete_sequence=['#FF6B6B']
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+    
+    # 2. Şüpheli vs Normal dağılımı
+    suspicion_counts = results_df['suspicion_level'].value_counts()
+    fig2 = px.pie(
+        values=suspicion_counts.values,
+        names=suspicion_counts.index,
+        title="Şüpheli vs Normal Tesisatlar",
+        color_discrete_map={'Şüpheli': '#FF6B6B', 'Normal': '#4ECDC4'}
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+    
+    # 3. Kış Trend Analizi
+    trend_counts = results_df['kis_trend'].value_counts()
+    fig3 = px.bar(
+        x=trend_counts.index,
+        y=trend_counts.values,
+        title="Kış Ayı Tüketim Trend Analizi",
+        color=trend_counts.values,
+        color_continuous_scale='Reds'
+    )
+    fig3.update_layout(showlegend=False)
+    st.plotly_chart(fig3, use_container_width=True)
+    
+    # 4. Kış vs Yaz tüketim karşılaştırması
+    fig4 = px.scatter(
+        results_df,
+        x='yaz_tuketim',
+        y='kis_tuketim',
+        color='suspicion_level',
+        size='anomali_sayisi',
+        title="Kış vs Yaz Tüketim Karşılaştırması",
+        labels={'yaz_tuketim': 'Yaz Tüketimi (m³)', 'kis_tuketim': 'Kış Tüketimi (m³)'},
+        color_discrete_map={'Şüpheli': '#FF6B6B', 'Normal': '#4ECDC4'},
+        hover_data=['kis_trend']
+    )
+    
+    # Normal pattern çizgisi ekle
+    max_val = max(results_df['yaz_tuketim'].max(), results_df['kis_tuketim'].max())
+    fig4.add_trace(go.Scatter(
+        x=[0, max_val],
+        y=[0, max_val],
+        mode='lines',
+        name='Eşit Tüketim Çizgisi',
+        line=dict(dash='dash', color='gray')
+    ))
+    
+    st.plotly_chart(fig4, use_container_width=True)
+    
+    # 5. Trend bazında anomali dağılımı
+    trend_anomali = results_df.groupby(['kis_trend', 'suspicion_level']).size().reset_index(name='count')
+    fig5 = px.bar(
+        trend_anomali,
+        x='kis_trend',
+        y='count',
+        color='suspicion_level',
+        title="Trend Bazında Anomali Dağılımı",
+        color_discrete_map={'Şüpheli': '#FF6B6B', 'Normal': '#4ECDC4'}
+    )
+    st.plotly_chart(fig5, use_container_width=True)
 
 # Ana uygulama
 if uploaded_file is not None:
@@ -422,8 +491,8 @@ if uploaded_file is not None:
                     st.metric("Toplam Anomali", total_anomalies)
                 
                 # Görselleştirmeler
-                # st.subheader("📊 Görselleştirmeler")
-                # create_visualizations(results_df, df, date_columns)
+                st.subheader("📊 Görselleştirmeler")
+                create_visualizations(results_df, df, date_columns)
                 
                 # Şüpheli tesisatlar tablosu
                 st.subheader("🚨 Şüpheli Tesisatlar")
