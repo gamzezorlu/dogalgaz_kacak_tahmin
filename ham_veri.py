@@ -71,7 +71,7 @@ def load_data(file):
 def detect_sap_format(df):
     """SAP formatını tespit et"""
     # SAP formatı için tipik sütun isimleri
-    sap_indicators = ['Tüketim.nk', 'Belge trh', 'KWH Tüketimi', 'Muhatap', 'Yerleşim yeri', 'Sm3']
+    sap_indicators = ['Tüketim noktası', 'Belge trh', 'KWH Tüketimi', 'Muhatap', 'Yerleşim yeri', 'Sm3']
     
     # Sütun isimlerini kontrol et
     columns_lower = [col.lower() if isinstance(col, str) else str(col).lower() for col in df.columns]
