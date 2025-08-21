@@ -102,7 +102,7 @@ def _safe_sort_date_cols(cols):
     return sorted(cols, key=keyf)
 
 def convert_raw_to_pivot(df):
-    """Raw veriyi pivot formata dönüştür"""
+    """Raw veriyi pivot formata dönüştür - Fixed version"""
     try:
         # Kolon isimlerini normalize et
         column_mapping = {}
@@ -124,52 +124,83 @@ def convert_raw_to_pivot(df):
         missing = [c for c in required if c not in df_renamed.columns]
         if missing:
             st.error(f"Eksik kolonlar: {missing}")
+            st.info(f"Mevcut kolonlar: {list(df_renamed.columns)}")
             return None
 
-        # Tip ve NaN temizliği
-        df_renamed['belge_tarihi'] = pd.to_datetime(
-            df_renamed['belge_tarihi'], errors='coerce', dayfirst=True
+        # Veri temizleme ve tip dönüşümleri
+        df_clean = df_renamed.copy()
+        
+        # Tarih sütununu temizle
+        df_clean['belge_tarihi'] = pd.to_datetime(
+            df_clean['belge_tarihi'], errors='coerce', dayfirst=True
         )
-        df_renamed['tuketim'] = pd.to_numeric(
-            df_renamed['tuketim'], errors='coerce'
+        
+        # Tüketim değerlerini sayısal yap
+        df_clean['tuketim'] = pd.to_numeric(
+            df_clean['tuketim'], errors='coerce'
         )
-        # kimlik kolonlarını stringe çek
-        df_renamed['tesisat_no'] = df_renamed['tesisat_no'].astype(str).str.strip()
-        df_renamed['bina_no'] = df_renamed['bina_no'].astype(str).str.strip()
-
-        # geçersiz kayıtları at
-        df_renamed = df_renamed.dropna(subset=['belge_tarihi'])
-        df_renamed['yil_ay'] = df_renamed['belge_tarihi'].dt.strftime('%Y/%m')
-        df_renamed['tuketim'] = df_renamed['tuketim'].fillna(0)
-
-        # yine NaN kalan anahtarları at
-        df_renamed = df_renamed.dropna(subset=['tesisat_no', 'bina_no', 'yil_ay'])
-
-        # Grupla -> tekilleştir
-        pivot_df = df_renamed.groupby(
+        
+        # String sütunları temizle
+        df_clean['tesisat_no'] = df_clean['tesisat_no'].astype(str).str.strip()
+        df_clean['bina_no'] = df_clean['bina_no'].astype(str).str.strip()
+        
+        # Geçersiz kayıtları temizle
+        df_clean = df_clean.dropna(subset=['belge_tarihi', 'tesisat_no', 'bina_no'])
+        df_clean['tuketim'] = df_clean['tuketim'].fillna(0)
+        
+        # Yıl/ay sütunu oluştur
+        df_clean['yil_ay'] = df_clean['belge_tarihi'].dt.strftime('%Y/%m')
+        
+        # Boş kayıtları temizle
+        df_clean = df_clean[
+            (df_clean['tesisat_no'] != 'nan') & 
+            (df_clean['bina_no'] != 'nan') & 
+            (df_clean['yil_ay'].notna())
+        ]
+        
+        if df_clean.empty:
+            st.error("Temizleme sonrası veri kalmadı!")
+            return None
+        
+        # Veriyi grupla ve topla
+        grouped_df = df_clean.groupby(
             ['tesisat_no', 'bina_no', 'yil_ay'], as_index=False
         )['tuketim'].sum()
-
-        # Pivot (kritik düzeltme: aggfunc belirt, fill_value kullan)
-        final_df = pivot_df.pivot_table(
-            index=['tesisat_no', 'bina_no'],
-            columns='yil_ay',
-            values='tuketim',
-            aggfunc='sum',
-            fill_value=0
-        ).reset_index()
-
-        final_df.columns.name = None
-
-        # Tarih kolonlarını sırala
+        
+        # Manuel pivot işlemi (pivot_table problemi için)
+        pivot_data = []
+        
+        # Tüm benzersiz tarih değerlerini al
+        all_dates = sorted(grouped_df['yil_ay'].unique())
+        
+        # Her tesisat-bina çifti için bir satır oluştur
+        for (tesisat, bina), group in grouped_df.groupby(['tesisat_no', 'bina_no']):
+            row_data = {'tesisat_no': tesisat, 'bina_no': bina}
+            
+            # Her tarih için tüketim değerini ekle
+            for date in all_dates:
+                date_data = group[group['yil_ay'] == date]['tuketim']
+                row_data[date] = date_data.iloc[0] if not date_data.empty else 0
+            
+            pivot_data.append(row_data)
+        
+        # DataFrame'e dönüştür
+        final_df = pd.DataFrame(pivot_data)
+        
+        # Tarih sütunlarını sırala
         date_cols = [c for c in final_df.columns if c not in ['tesisat_no', 'bina_no']]
         date_cols = _safe_sort_date_cols(date_cols)
         final_df = final_df[['tesisat_no', 'bina_no'] + date_cols]
-
+        
         return final_df
 
     except Exception as e:
         st.error(f"Veri dönüştürme hatası: {str(e)}")
+        st.info("Hata detayları için debug bilgileri:")
+        if 'df_clean' in locals():
+            st.write(f"Temizlenmiş veri boyutu: {df_clean.shape}")
+            st.write(f"Benzersiz yil_ay değerleri: {df_clean['yil_ay'].nunique()}")
+            st.write(f"Benzersiz tesisat sayısı: {df_clean['tesisat_no'].nunique()}")
         return None
 
 def parse_date_columns(df):
@@ -214,7 +245,7 @@ def analyze_consumption_patterns(df, date_columns, tesisat_col, bina_col):
         for date_col in date_columns:
             try:
                 value = row[date_col]
-                if pd.notna(value):
+                if pd.notna(value) and value != '':
                     year, month = date_col.split('/')
                     consumption_data.append({
                         'year': int(year),
@@ -383,13 +414,14 @@ def create_visualizations(results_df, original_df, date_columns):
 
     max_val = max(float(results_df['yaz_tuketim'].max() or 0),
                   float(results_df['kis_tuketim'].max() or 0))
-    fig4.add_trace(go.Scatter(
-        x=[0, max_val],
-        y=[0, max_val],
-        mode='lines',
-        name='Eşit Tüketim Çizgisi',
-        line=dict(dash='dash', color='gray')
-    ))
+    if max_val > 0:
+        fig4.add_trace(go.Scatter(
+            x=[0, max_val],
+            y=[0, max_val],
+            mode='lines',
+            name='Eşit Tüketim Çizgisi',
+            line=dict(dash='dash', color='gray')
+        ))
     st.plotly_chart(fig4, use_container_width=True)
 
     # 5) Trend x Durum
@@ -469,129 +501,49 @@ if uploaded_file is not None:
                 with st.spinner("Analiz yapılıyor..."):
                     results_df = analyze_consumption_patterns(df, date_columns, tesisat_col, bina_col)
 
-                    st.subheader("📈 Analiz Sonuçları")
-                    c1, c2, c3, c4 = st.columns(4)
-                    with c1: st.metric("Toplam Tesisat", len(results_df))
-                    with c2:
-                        suspicious_count = int((results_df['suspicion_level'] == 'Şüpheli').sum())
-                        st.metric("Şüpheli Tesisat", suspicious_count)
-                    with c3:
-                        if len(results_df) > 0:
-                            suspicious_rate = (suspicious_count / len(results_df)) * 100
-                            st.metric("Şüpheli Oran", f"{suspicious_rate:.1f}%")
-                    with c4:
-                        total_anomalies = int(results_df['anomali_sayisi'].sum())
-                        st.metric("Toplam Anomali", total_anomalies)
-
-                    # Görselleştirmeler
-                    st.subheader("📊 Görselleştirmeler")
                     if not results_df.empty:
+                        st.subheader("📈 Analiz Sonuçları")
+                        c1, c2, c3, c4 = st.columns(4)
+                        with c1: st.metric("Toplam Tesisat", len(results_df))
+                        with c2:
+                            suspicious_count = int((results_df['suspicion_level'] == 'Şüpheli').sum())
+                            st.metric("Şüpheli Tesisat", suspicious_count)
+                        with c3:
+                            if len(results_df) > 0:
+                                suspicious_rate = (suspicious_count / len(results_df)) * 100
+                                st.metric("Şüpheli Oran", f"{suspicious_rate:.1f}%")
+                        with c4:
+                            total_anomalies = int(results_df['anomali_sayisi'].sum())
+                            st.metric("Toplam Anomali", total_anomalies)
+
+                        # Görselleştirmeler
+                        st.subheader("📊 Görselleştirmeler")
                         create_visualizations(results_df, df, date_columns)
-                    else:
-                        st.info("Analiz sonucunda gösterilecek veri oluşmadı.")
 
-                    # Şüpheli tesisatlar
-                    st.subheader("🚨 Şüpheli Tesisatlar")
-                    suspicious_df = results_df[results_df['suspicion_level'] == 'Şüpheli'].copy()
+                        # Şüpheli tesisatlar
+                        st.subheader("🚨 Şüpheli Tesisatlar")
+                        suspicious_df = results_df[results_df['suspicion_level'] == 'Şüpheli'].copy()
 
-                    if not suspicious_df.empty:
-                        display_cols = ['tesisat_no', 'bina_no', 'kis_tuketim', 'yaz_tuketim',
-                                        'ortalama_tuketim', 'kis_trend', 'anomali_sayisi', 'anomaliler']
-                        suspicious_display = suspicious_df[display_cols].copy()
-                        suspicious_display.columns = ['Tesisat No', 'Bina No', 'Kış Tüketim',
-                                                      'Yaz Tüketim', 'Ortalama Tüketim', 'Kış Trend',
-                                                      'Anomali Sayısı', 'Anomaliler']
-                        for col in ['Kış Tüketim', 'Yaz Tüketim', 'Ortalama Tüketim']:
-                            suspicious_display[col] = suspicious_display[col].round(1)
+                        if not suspicious_df.empty:
+                            display_cols = ['tesisat_no', 'bina_no', 'kis_tuketim', 'yaz_tuketim',
+                                            'ortalama_tuketim', 'kis_trend', 'anomali_sayisi', 'anomaliler']
+                            suspicious_display = suspicious_df[display_cols].copy()
+                            suspicious_display.columns = ['Tesisat No', 'Bina No', 'Kış Tüketim',
+                                                          'Yaz Tüketim', 'Ortalama Tüketim', 'Kış Trend',
+                                                          'Anomali Sayısı', 'Anomaliler']
+                            for col in ['Kış Tüketim', 'Yaz Tüketim', 'Ortalama Tüketim']:
+                                suspicious_display[col] = suspicious_display[col].round(1)
 
-                        st.dataframe(suspicious_display, use_container_width=True, hide_index=True)
+                            st.dataframe(suspicious_display, use_container_width=True, hide_index=True)
 
-                        buffer = BytesIO()
-                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                            suspicious_display.to_excel(writer, index=False, sheet_name='Şüpheli Tesisatlar')
-                        st.download_button(
-                            label="📥 Şüpheli Tesisatları İndir (Excel)",
-                            data=buffer.getvalue(),
-                            file_name="supheli_tesisatlar.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    else:
-                        st.success("🎉 Şüpheli tesisat bulunamadı!")
-
-                # ---- Tüm Sonuçlar (analiz bloğunun dışına dikkat) ----
-                st.subheader("📋 Tüm Sonuçlar")
-
-                filter_col1, filter_col2 = st.columns(2)
-                with filter_col1:
-                    suspicion_filter = st.selectbox("Şüpheli Durumu", options=['Tümü', 'Şüpheli', 'Normal'], index=0)
-                with filter_col2:
-                    bina_list = sorted(results_df['bina_no'].dropna().astype(str).unique().tolist()) if not results_df.empty else []
-                    bina_filter = st.selectbox("Bina Numarası", options=['Tümü'] + bina_list, index=0)
-
-                filtered_df = results_df.copy()
-                if suspicion_filter != 'Tümü':
-                    filtered_df = filtered_df[filtered_df['suspicion_level'] == suspicion_filter]
-                if bina_filter != 'Tümü':
-                    filtered_df = filtered_df[filtered_df['bina_no'] == bina_filter]
-
-                if not filtered_df.empty:
-                    display_cols = ['tesisat_no', 'bina_no', 'kis_tuketim', 'yaz_tuketim',
-                                    'ortalama_tuketim', 'kis_trend', 'suspicion_level', 'anomaliler']
-                    filtered_display = filtered_df[display_cols].copy()
-                    filtered_display.columns = ['Tesisat No', 'Bina No', 'Kış Tüketim',
-                                                'Yaz Tüketim', 'Ortalama Tüketim', 'Kış Trend',
-                                                'Durum', 'Anomaliler']
-                    for col in ['Kış Tüketim', 'Yaz Tüketim', 'Ortalama Tüketim']:
-                        filtered_display[col] = filtered_display[col].round(1)
-
-                    st.dataframe(filtered_display, use_container_width=True, hide_index=True)
-
-                    buffer_all = BytesIO()
-                    with pd.ExcelWriter(buffer_all, engine='openpyxl') as writer:
-                        filtered_display.to_excel(writer, index=False, sheet_name='Tüm Sonuçlar')
-                    st.download_button(
-                        label="📥 Filtrelenmiş Sonuçları İndir (Excel)",
-                        data=buffer_all.getvalue(),
-                        file_name="dogalgaz_analiz_sonuclari.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                else:
-                    st.warning("Filtreye uygun veri bulunamadı.")
-
-else:
-    st.info("👈 Lütfen sol panelden bir dosya yükleyin")
-
-    # Örnek dosya formatı
-    st.subheader("📄 Beklenen Dosya Formatı")
-    st.write("Dosyanızda aşağıdaki sütunlar bulunmalıdır:")
-
-    example_data = {
-        'tesisat_no': ['T001', 'T002', 'T003'],
-        'bina_no': ['B001', 'B001', 'B002'],
-        'Belge tarihi': ['2024-01-01', '2024-01-15', '2024-02-01'],
-        'sm3': [110, 20, 140],
-    }
-    example_df = pd.DataFrame(example_data)
-    st.dataframe(example_df, use_container_width=True)
-
-# -------------------- Bilgi paneli --------------------
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📋 Tespit Kriterleri")
-st.sidebar.markdown(f"""
-- **Kış Düşük Tüketim**: < {kis_tuketim_esigi} m³/ay
-- **Bina Ortalaması**: %{bina_ort_dusuk_oran} düşük
-- **Ani Düşüş**: %{ani_dusus_orani} düşüş
-- **Kış-Yaz Farkı**: Çok az fark
-- **Toplam Tüketim**: Çok düşük
-- **Sıfır Tüketim**: 6+ ay sıfır
-""")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ℹ️ Kullanım Bilgileri")
-st.sidebar.markdown("""
-1. CSV veya Excel dosyasını yükleyin
-2. Tesisat ve bina sütunlarını seçin
-3. Parametreleri ayarlayın
-4. Analizi başlatın
-5. Sonuçları inceleyin ve Excel olarak indirin
-""")
+                            buffer = BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                suspicious_display.to_excel(writer, index=False, sheet_name='Şüpheli Tesisatlar')
+                            st.download_button(
+                                label="📥 Şüpheli Tesisatları İndir (Excel)",
+                                data=buffer.getvalue(),
+                                file_name="supheli_tesisatlar.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        else:
+                            st.success("🎉 Şüpheli tesisat bulunamadı!")
