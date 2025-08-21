@@ -71,7 +71,7 @@ def load_data(file):
 def detect_sap_format(df):
     """SAP formatını tespit et"""
     # SAP formatı için tipik sütun isimleri
-    sap_indicators = ['Tüketim.nk', 'Belge trh', 'KWH Tüketimi', 'Muhatap', 'Yerleşim yeri', 'Sm3']
+    sap_indicators = ['Tüketim.nk', 'Belge trh', 'KWH Tüketimi', 'Bağlantı nesnesi', 'Yerleşim yeri', 'Sm3']
     
     # Sütun isimlerini kontrol et
     columns_lower = [col.lower() if isinstance(col, str) else str(col).lower() for col in df.columns]
@@ -90,7 +90,7 @@ def process_sap_data(df):
         col_lower = str(col).lower()
         if 'tüketim' in col_lower and 'nk' in col_lower:
             column_mapping['tesisat_no'] = col
-        elif 'muhatap' in col_lower:
+        elif 'Bağlantı nesnesi' in col_lower:
             column_mapping['bina_no'] = col
         elif 'belge' in col_lower and 'trh' in col_lower:
             column_mapping['tarih'] = col
@@ -546,3 +546,4 @@ if uploaded_file is not None:
                     )
                     
                     # Tüm sonuçları Excel olarak indir
+
