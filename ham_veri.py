@@ -608,22 +608,4 @@ if uploaded_file is not None:
                         else:
                             st.success("🎉 Şüpheli tesisat bulunamadı!")
 
-                        # Tüm Sonuçlar
-                        st.subheader("📋 Tüm Sonuçlar")
-
-                        filter_col1, filter_col2 = st.columns(2)
-                        with filter_col1:
-                            suspicion_filter = st.selectbox("Şüpheli Durumu", options=['Tümü', 'Şüpheli', 'Normal'], index=0)
-                        with filter_col2:
-                            bina_list = sorted(results_df['bina_no'].dropna().astype(str).unique().tolist()) if not results_df.empty else []
-                            bina_filter = st.selectbox("Bina Numarası", options=['Tümü'] + bina_list, index=0)
-
-                        filtered_df = results_df.copy()
-                        if suspicion_filter != 'Tümü':
-                            filtered_df = filtered_df[filtered_df['suspicion_level'] == suspicion_filter]
-                        if bina_filter != 'Tümü':
-                            filtered_df = filtered_df[filtered_df['bina_no'] == bina_filter]
-
-                        if not filtered_df.empty:
-                            display_cols = ['tesisat_no', 'bina_no', 'kis_tuketim', 'yaz_tuketim',
-                                            'ortalama_tuketim', 'kis_trend', 'suspicion
+                      
