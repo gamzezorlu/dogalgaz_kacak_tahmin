@@ -29,15 +29,37 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 def load_data(file):
-    """Veri yükleme fonksiyonu"""
+    """Veri yükleme fonksiyonu - Çoklu kodlama desteği ile"""
     try:
         if file.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(file)
+            # Excel dosyaları için
+            df = pd.read_excel(file, engine='openpyxl')
         else:
-            df = pd.read_csv(file)
+            # CSV dosyaları için farklı kodlamaları dene
+            encodings = ['utf-8', 'utf-8-sig', 'iso-8859-9', 'windows-1254', 'cp1254', 'latin1']
+            
+            for encoding in encodings:
+                try:
+                    file.seek(0)  # Dosya pointer'ını başa al
+                    df = pd.read_csv(file, encoding=encoding, sep=None, engine='python')
+                    st.success(f"Dosya başarıyla yüklendi (Kodlama: {encoding})")
+                    return df
+                except (UnicodeDecodeError, pd.errors.ParserError):
+                    continue
+            
+            # Hiçbiri işe yaramazsa son deneme
+            file.seek(0)
+            df = pd.read_csv(file, encoding='utf-8', errors='ignore', sep=None, engine='python')
+            st.warning("Dosya yüklendi ancak bazı karakterler düzgün görüntülenmeyebilir.")
+            
         return df
+        
     except Exception as e:
         st.error(f"Dosya yüklenirken hata oluştu: {str(e)}")
+        st.info("💡 **Çözüm önerileri:**")
+        st.info("1. Excel dosyasını CSV olarak kaydedin (UTF-8 kodlaması ile)")
+        st.info("2. Dosyada Türkçe karakter varsa, Excel'de 'Farklı Kaydet' > 'CSV UTF-8' seçin")
+        st.info("3. Dosya adında Türkçe karakter bulunmamasına dikkat edin")
         return None
 
 def detect_anomalies(df, tesis_id, method='iqr', threshold=2.5):
@@ -141,13 +163,82 @@ if uploaded_file is not None:
         expected_columns = ['Belge tarihi', 'Tüketim noktası', 'Başlangıç nesnesi', 'KWH Tüke Sm3']
         
         if not all(col in df.columns for col in expected_columns):
-            st.error("Dosyada gerekli kolonlar bulunamadı. Gerekli kolonlar: Belge tarihi, Tüketim noktası, Başlangıç nesnesi, KWH Tüke Sm3")
-            st.info("Mevcut kolonlar: " + ", ".join(df.columns.tolist()))
+            st.error("❌ Dosyada gerekli kolonlar bulunamadı.")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("🔍 Bulunan Kolonlar:")
+                for i, col in enumerate(df.columns.tolist(), 1):
+                    st.write(f"{i}. {col}")
+            
+            with col2:
+                st.subheader("✅ Gerekli Kolonlar:")
+                for col in expected_columns:
+                    st.write(f"• {col}")
+            
+            st.info("💡 **Çözüm:** Kolon adlarınızı kontrol edin veya Excel'de başlık satırını düzenleyin")
+            
+            # Kolon eşleştirme seçeneği
+            st.subheader("🔄 Manuel Kolon Eşleştirme")
+            col_mapping = {}
+            
+            for req_col in expected_columns:
+                selected_col = st.selectbox(
+                    f"'{req_col}' için hangi kolonu kullanmak istiyorsunuz?",
+                    options=[''] + df.columns.tolist(),
+                    key=f"mapping_{req_col}"
+                )
+                if selected_col:
+                    col_mapping[req_col] = selected_col
+            
+            if len(col_mapping) == len(expected_columns):
+                if st.button("Eşleştirmeyi Uygula"):
+                    # Kolonları yeniden adlandır
+                    df_renamed = df.copy()
+                    for new_name, old_name in col_mapping.items():
+                        df_renamed = df_renamed.rename(columns={old_name: new_name})
+                    df = df_renamed
+                    st.success("✅ Kolon eşleştirmesi başarılı!")
+                    st.experimental_rerun()
+            else:
+                st.warning("Tüm gerekli kolonları eşleştirin")
         else:
-            # Veri ön işleme
-            df['Belge tarihi'] = pd.to_datetime(df['Belge tarihi'])
-            df['KWH Tüke Sm3'] = pd.to_numeric(df['KWH Tüke Sm3'], errors='coerce')
-            df = df.dropna(subset=['KWH Tüke Sm3'])
+            # Veri ön işleme - Geliştirilmiş
+            try:
+                # Tarih kolonunu dönüştür
+                if df['Belge tarihi'].dtype == 'object':
+                    # Farklı tarih formatlarını dene
+                    date_formats = ['%d.%m.%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y']
+                    
+                    for date_format in date_formats:
+                        try:
+                            df['Belge tarihi'] = pd.to_datetime(df['Belge tarihi'], format=date_format)
+                            break
+                        except:
+                            continue
+                    else:
+                        # Hiçbiri çalışmazsa otomatik algılama
+                        df['Belge tarihi'] = pd.to_datetime(df['Belge tarihi'], infer_datetime_format=True)
+                else:
+                    df['Belge tarihi'] = pd.to_datetime(df['Belge tarihi'])
+                
+                # Sayısal sütunu temizle
+                df['KWH Tüke Sm3'] = df['KWH Tüke Sm3'].astype(str).str.replace(',', '.')
+                df['KWH Tüke Sm3'] = pd.to_numeric(df['KWH Tüke Sm3'], errors='coerce')
+                
+                # Geçersiz değerleri temizle
+                initial_count = len(df)
+                df = df.dropna(subset=['KWH Tüke Sm3', 'Belge tarihi'])
+                cleaned_count = len(df)
+                
+                if initial_count - cleaned_count > 0:
+                    st.warning(f"⚠️ {initial_count - cleaned_count} geçersiz kayıt temizlendi")
+                
+                st.success(f"✅ {cleaned_count} kayıt başarıyla işlendi")
+                
+            except Exception as e:
+                st.error(f"Veri ön işleme hatası: {str(e)}")
+                st.info("Tarih formatınızın 'GG.AA.YYYY' veya sayısal değerlerin nokta/virgül ile ayrıldığından emin olun")
             
             # Sidebar parametreleri
             anomaly_method = st.sidebar.selectbox(
