@@ -424,14 +424,29 @@ if uploaded_file is not None:
                         hide_index=True
                     )
                     
+                    import io
+
                     # Excel indirme
-                    excel = suspicious_display.to_excel(index=False)
+                    output = io.BytesIO()
+
+                    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                         suspicious_display.to_excel(writer, index=False, sheet_name="Şüpheli Tesisatlar")
+
+                    output.seek(0)
                     st.download_button(
                         label="📥 Şüpheli Tesisatları İndir (EXCEL)",
-                        data=excel,
+                        data=output,
                         file_name="supheli_tesisatlar.xlsx",
-                        mime="text/xlsx"
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
+                    # Excel indirme
+                   # excel = suspicious_display.to_excel(index=False)
+                   # st.download_button(
+                        #label="📥 Şüpheli Tesisatları İndir (EXCEL)",
+                       # data=excel,
+                       # file_name="supheli_tesisatlar.xlsx",
+                        #mime="text/xlsx"
+                    #)
                 else:
                     st.success("🎉 Şüpheli tesisat bulunamadı!")
                 
@@ -537,3 +552,4 @@ st.sidebar.markdown("""
 5. Sonuçları inceleyin ve indirin
 
 """)
+
