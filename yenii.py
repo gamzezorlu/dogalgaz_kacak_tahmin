@@ -262,11 +262,19 @@ if uploaded_file is not None:
         if tum_anomaliler:
             anomali_df = pd.concat(tum_anomaliler, ignore_index=True)
             
-            # Duplike kayıtları kaldırma
-            anomali_df = anomali_df.drop_duplicates(
-                subset=['tuketim_noktasi', 'tarih_str'], 
-                keep='first'
-            )
+            # Aynı tesisat ve tarih için birden fazla anomali türü varsa birleştirme
+            def anomali_birlestir(group):
+                if len(group) == 1:
+                    return group.iloc[0]
+                else:
+                    # Birden fazla anomali türü varsa birleştir
+                    birlesik = group.iloc[0].copy()
+                    birlesik['anomali_tipi'] = ' + '.join(group['anomali_tipi'].unique())
+                    birlesik['aciklama'] = ' | '.join(group['aciklama'].unique())
+                    return birlesik
+            
+            # Duplike kayıtları birleştirme
+            anomali_df = anomali_df.groupby(['tuketim_noktasi', 'tarih_str']).apply(anomali_birlestir).reset_index(drop=True)
             
             # Sonuçları görüntüleme
             st.header("🚨 Tespit Edilen Anomaliler")
