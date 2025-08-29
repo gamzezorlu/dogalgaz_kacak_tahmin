@@ -3,505 +3,275 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import StandardScaler
-from scipy import stats
+from datetime import datetime
 import io
-import warnings
-warnings.filterwarnings('ignore')
 
-def load_and_process_data(uploaded_file):
-    """Excel veya CSV dosyasını yükle ve işle"""
+# Sayfa yapılandırması
+st.set_page_config(
+    page_title="🔥 Doğalgaz Tüketim Anomali Tespiti",
+    page_icon="🔥",
+    layout="wide"
+)
+
+# Ana başlık
+st.title("🔥 Doğalgaz Tüketim Anomali Tespit Sistemi")
+st.markdown("---")
+
+# Dosya yükleme bölümü
+st.header("📂 Excel Dosyası Yükle")
+uploaded_file = st.file_uploader(
+    "Doğalgaz tüketim verilerini içeren Excel dosyasını yükleyin",
+    type=['xlsx', 'xls'],
+    help="Excel dosyası: Belge tarihi, Tüketim noktası, Bağlantı nesnesi, Tüketim miktarı, KWH Tüketim sütunlarını içermelidir"
+)
+
+if uploaded_file is not None:
     try:
-        # Dosya uzantısını kontrol et
-        file_extension = uploaded_file.name.split('.')[-1].lower()
+        # Excel dosyasını okuma
+        df = pd.read_excel(uploaded_file)
         
-        if file_extension in ['xlsx', 'xls']:
-            # Excel dosyasını oku
-            df = pd.read_excel(uploaded_file, engine='openpyxl' if file_extension == 'xlsx' else None)
-        elif file_extension == 'csv':
-            # CSV dosyasını oku
-            df = pd.read_csv(uploaded_file, encoding='utf-8')
-        else:
-            st.error("Desteklenmeyen dosya formatı! Lütfen Excel (.xlsx, .xls) veya CSV (.csv) dosyası yükleyin.")
-            return None
-        
-        # Sütun isimlerini temizle
-        df.columns = df.columns.str.strip()
-        
-        # Tarih sütununu datetime'a çevir
-        df['Belge tarihi'] = pd.to_datetime(df['Belge tarihi'], format='%d.%m.%Y', errors='coerce')
-        
-        # Sm3 sütununu sayısal değere çevir
-        if 'Sm3' in df.columns:
-            df['Sm3'] = pd.to_numeric(df['Sm3'].astype(str).str.replace(',', '.'), errors='coerce')
-        
-        # Null değerleri temizle
-        df = df.dropna(subset=['Belge tarihi', 'Sm3'])
-        
-        # Tarihe göre sırala
-        df = df.sort_values('Belge tarihi')
-        
-        return df
-    except Exception as e:
-        st.error(f"Veri yükleme hatası: {str(e)}")
-        return None
-
-def add_seasonal_features(df):
-    """Mevsimsel özellikler ekle"""
-    df = df.copy()
-    df['Ay'] = df['Belge tarihi'].dt.month
-    df['Yıl'] = df['Belge tarihi'].dt.year
-    df['Gün'] = df['Belge tarihi'].dt.dayofyear
-    
-    # Mevsim bilgisi ekle
-    def get_season(month):
-        if month in [12, 1, 2]:
-            return 'Kış'
-        elif month in [3, 4, 5]:
-            return 'İlkbahar'
-        elif month in [6, 7, 8]:
-            return 'Yaz'
-        else:
-            return 'Sonbahar'
-    
-    df['Mevsim'] = df['Ay'].apply(get_season)
-    
-    # Trigonometrik özellikler (mevsimsellik için)
-    df['Sin_Ay'] = np.sin(2 * np.pi * df['Ay'] / 12)
-    df['Cos_Ay'] = np.cos(2 * np.pi * df['Ay'] / 12)
-    
-    return df
-
-def detect_anomalies_isolation_forest(df, contamination=0.1):
-    """Isolation Forest ile anomali tespiti"""
-    # Özellik matrisini hazırla
-    features = ['Sm3', 'Sin_Ay', 'Cos_Ay']
-    X = df[features].copy()
-    
-    # Standardize et
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Isolation Forest modelini eğit
-    iso_forest = IsolationForest(contamination=contamination, random_state=42)
-    anomalies = iso_forest.fit_predict(X_scaled)
-    
-    # Anomali skorları
-    scores = iso_forest.decision_function(X_scaled)
-    
-    return anomalies, scores
-
-def detect_anomalies_zscore(df, threshold=3):
-    """Z-Score yöntemi ile anomali tespiti (mevsimsel düzeltmeli)"""
-    df_copy = df.copy()
-    
-    # Her mevsim için ayrı z-score hesapla
-    anomalies = []
-    z_scores = []
-    
-    for season in df_copy['Mevsim'].unique():
-        season_data = df_copy[df_copy['Mevsim'] == season]['Sm3']
-        mean_val = season_data.mean()
-        std_val = season_data.std()
-        
-        season_z_scores = np.abs((season_data - mean_val) / std_val)
-        season_anomalies = (season_z_scores > threshold).astype(int) * 2 - 1  # -1 normal, 1 anomali
-        
-        z_scores.extend(season_z_scores.tolist())
-        anomalies.extend(season_anomalies.tolist())
-    
-    return np.array(anomalies), np.array(z_scores)
-
-def detect_anomalies_iqr(df):
-    """IQR yöntemi ile anomali tespiti (mevsimsel düzeltmeli)"""
-    df_copy = df.copy()
-    anomalies = []
-    
-    for season in df_copy['Mevsim'].unique():
-        season_data = df_copy[df_copy['Mevsim'] == season]['Sm3']
-        Q1 = season_data.quantile(0.25)
-        Q3 = season_data.quantile(0.75)
-        IQR = Q3 - Q1
-        
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        
-        season_anomalies = ((season_data < lower_bound) | (season_data > upper_bound)).astype(int) * 2 - 1
-        anomalies.extend(season_anomalies.tolist())
-    
-    return np.array(anomalies)
-
-def create_time_series_plot(df, anomalies_col):
-    """Zaman serisi grafiği oluştur"""
-    fig = make_subplots(rows=2, cols=1, 
-                       subplot_titles=('Doğalgaz Tüketimi ve Anomaliler', 'Mevsimsel Dağılım'),
-                       vertical_spacing=0.1)
-    
-    # Normal tüketim
-    normal_data = df[df[anomalies_col] == -1]
-    fig.add_trace(
-        go.Scatter(x=normal_data['Belge tarihi'], 
-                  y=normal_data['Sm3'],
-                  mode='markers',
-                  name='Normal Tüketim',
-                  marker=dict(color='blue', size=6)),
-        row=1, col=1
-    )
-    
-    # Anomali tüketim
-    anomaly_data = df[df[anomalies_col] == 1]
-    if not anomaly_data.empty:
-        fig.add_trace(
-            go.Scatter(x=anomaly_data['Belge tarihi'], 
-                      y=anomaly_data['Sm3'],
-                      mode='markers',
-                      name='Anomali',
-                      marker=dict(color='red', size=8, symbol='diamond')),
-            row=1, col=1
-        )
-    
-    # Mevsimsel box plot
-    fig.add_trace(
-        go.Box(x=df['Mevsim'], y=df['Sm3'], name='Mevsimsel Dağılım'),
-        row=2, col=1
-    )
-    
-    fig.update_layout(height=800, showlegend=True, title_text="Doğalgaz Tüketim Analizi")
-    fig.update_xaxes(title_text="Tarih", row=1, col=1)
-    fig.update_yaxes(title_text="Tüketim (Sm3)", row=1, col=1)
-    fig.update_xaxes(title_text="Mevsim", row=2, col=1)
-    fig.update_yaxes(title_text="Tüketim (Sm3)", row=2, col=1)
-    
-    return fig
-
-def create_excel_report(df, anomaly_df):
-    """Excel raporu oluştur"""
-    output = io.BytesIO()
-    
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Anomali tesisatları (ana rapor)
-        anomaly_summary = anomaly_df.groupby('Tüketim noktası').agg({
-            'Sm3': ['count', 'mean', 'min', 'max'],
-            'Belge tarihi': ['min', 'max']
-        }).round(2)
-        
-        anomaly_summary.columns = ['Anomali Sayısı', 'Ortalama Tüketim', 'Min Tüketim', 'Max Tüketim', 'İlk Anomali', 'Son Anomali']
-        anomaly_summary = anomaly_summary.sort_values('Anomali Sayısı', ascending=False)
-        anomaly_summary.to_excel(writer, sheet_name='Anomali Tesisatları', index=True)
-        
-        # Ay-Ay Tüketim Analizi (Pivot Table)
-        df_pivot = df.pivot_table(
-            index='Tüketim noktası', 
-            columns=['Yıl', 'Ay'], 
-            values='Sm3', 
-            aggfunc='sum'
-        ).fillna(0).round(2)
-        df_pivot.to_excel(writer, sheet_name='Ay-Ay Tüketim', index=True)
-        
-        # Anomali Pivot Table
-        anomaly_pivot = df.pivot_table(
-            index='Tüketim noktası', 
-            columns=['Yıl', 'Ay'], 
-            values='Anomali', 
-            aggfunc=lambda x: (x == 1).sum()
-        ).fillna(0).astype(int)
-        anomaly_pivot.to_excel(writer, sheet_name='Ay-Ay Anomali Sayısı', index=True)
-        
-        # Tesisat bazında aylık istatistikler
-        monthly_stats = df.groupby(['Tüketim noktası', 'Yıl', 'Ay']).agg({
-            'Sm3': ['sum', 'mean', 'count'],
-            'Anomali': lambda x: (x == 1).sum()
-        }).round(2)
-        monthly_stats.columns = ['Toplam Tüketim', 'Ortalama Tüketim', 'Kayıt Sayısı', 'Anomali Sayısı']
-        monthly_stats['Anomali Var mı?'] = monthly_stats['Anomali Sayısı'].apply(lambda x: 'Evet' if x > 0 else 'Hayır')
-        monthly_stats.to_excel(writer, sheet_name='Aylık İstatistikler', index=True)
-        
-        # Detaylı anomali listesi
-        detail_cols = ['Belge tarihi', 'Tüketim noktası', 'Bağlantı nesnesi', 'Sm3', 'Mevsim', 'Ay', 'Yıl']
-        if 'Anomali_Skoru' in anomaly_df.columns:
-            detail_cols.append('Anomali_Skoru')
-        if 'Z_Score' in anomaly_df.columns:
-            detail_cols.append('Z_Score')
-            
-        anomaly_detail = anomaly_df[detail_cols].copy()
-        anomaly_detail = anomaly_detail.sort_values(['Tüketim noktası', 'Belge tarihi'])
-        anomaly_detail.to_excel(writer, sheet_name='Detaylı Anomali Listesi', index=False)
-        
-        # Mevsimsel istatistikler
-        seasonal_stats = df.groupby(['Tüketim noktası', 'Mevsim']).agg({
-            'Sm3': ['mean', 'std', 'count'],
-            'Anomali': lambda x: (x == 1).sum()
-        }).round(2)
-        seasonal_stats.columns = ['Ortalama', 'Std Sapma', 'Kayıt Sayısı', 'Anomali Sayısı']
-        seasonal_stats['Anomali Oranı (%)'] = (seasonal_stats['Anomali Sayısı'] / seasonal_stats['Kayıt Sayısı'] * 100).round(1)
-        seasonal_stats.to_excel(writer, sheet_name='Mevsimsel İstatistikler', index=True)
-        
-        # Genel özet
-        summary_data = {
-            'Metrik': [
-                'Toplam Kayıt Sayısı',
-                'Toplam Tesisat Sayısı', 
-                'Anomali Kayıt Sayısı',
-                'Anomalili Tesisat Sayısı',
-                'Genel Anomali Oranı (%)',
-                'Analiz Tarihi',
-                'Analiz Dönemi (İlk)',
-                'Analiz Dönemi (Son)'
-            ],
-            'Değer': [
-                len(df),
-                df['Tüketim noktası'].nunique(),
-                len(anomaly_df),
-                anomaly_df['Tüketim noktası'].nunique(),
-                round((len(anomaly_df) / len(df)) * 100, 2),
-                datetime.now().strftime('%d.%m.%Y %H:%M'),
-                df['Belge tarihi'].min().strftime('%d.%m.%Y'),
-                df['Belge tarihi'].max().strftime('%d.%m.%Y')
-            ]
+        # Sütun adlarını standartlaştırma
+        column_mapping = {
+            'Belge tarihi': 'tarih',
+            'Tüketim noktası': 'tuketim_noktasi', 
+            'Bağlantı nesnesi': 'baglanti_nesnesi',
+            'Tüketim miktarı': 'tuketim_miktari',
+            'KWH Tüketim': 'kwh_tuketim'
         }
-        summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='Genel Özet', index=False)
-    
-    output.seek(0)
-    return output
-
-def main():
-    st.set_page_config(page_title="Doğalgaz Anomali Tespit Sistemi", layout="wide")
-    
-    st.title("🔥 Doğalgaz Tüketim Anomali Tespit Sistemi")
-    st.markdown("Bu uygulama doğalgaz tüketim verilerinizi analiz ederek anormal tüketimleri tespit eder.")
-    
-    # Sidebar - Parametreler
-    st.sidebar.header("⚙️ Analiz Parametreleri")
-    
-    # Dosya yükleme
-    uploaded_file = st.file_uploader("Excel veya CSV dosyasını yükleyin", type=['xlsx', 'xls', 'csv'])
-    
-    if uploaded_file is not None:
-        # Veriyi yükle ve işle
-        df = load_and_process_data(uploaded_file)
         
-        if df is not None and not df.empty:
-            st.success(f"✅ {len(df)} adet kayıt başarıyla yüklendi!")
+        # Sütun adlarını eşleştirme
+        df.columns = df.columns.str.strip()
+        for old_name, new_name in column_mapping.items():
+            if old_name in df.columns:
+                df = df.rename(columns={old_name: new_name})
+        
+        # Tarih sütununu datetime'a çevirme
+        if 'tarih' in df.columns:
+            df['tarih'] = pd.to_datetime(df['tarih'])
+            df['yil'] = df['tarih'].dt.year
+            df['ay'] = df['tarih'].dt.month
+            df['ay_ad'] = df['tarih'].dt.strftime('%B')
+        
+        st.success(f"✅ Dosya başarıyla yüklendi! {len(df)} satır veri okundu.")
+        
+        # Veri önizlemesi
+        with st.expander("📊 Veri Önizlemesi"):
+            st.dataframe(df.head(10))
             
-            # Mevsimsel özellikler ekle
-            df = add_seasonal_features(df)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Toplam Kayıt", len(df))
+        with col2:
+            st.metric("Tesisat Sayısı", df['tuketim_noktasi'].nunique())
+        with col3:
+            st.metric("Bina Sayısı", df['baglanti_nesnesi'].nunique())
             
-            # Sidebar parametreleri
-            method = st.sidebar.selectbox(
-                "Anomali Tespit Yöntemi",
-                ["Isolation Forest", "Z-Score (Mevsimsel)", "IQR (Mevsimsel)"]
-            )
+    except Exception as e:
+        st.error(f"❌ Dosya okuma hatası: {str(e)}")
+        st.stop()
+        
+    # Parametreler bölümü
+    st.sidebar.header("⚙️ Analiz Parametreleri")
+    kis_tuketim_esigi = st.sidebar.slider(
+        "Kış ayı düşük tüketim eşiği (m³/ay)",
+        min_value=10, max_value=100, value=30,
+        help="Kış aylarında bu değerin altındaki tüketim şüpheli kabul edilir"
+    )
+    bina_ort_dusuk_oran = st.sidebar.slider(
+        "Bina ortalamasından düşük olma oranı (%)",
+        min_value=30, max_value=90, value=60,
+        help="Bina ortalamasından bu oranda düşük tüketim şüpheli kabul edilir"
+    )
+    ani_dusus_orani = st.sidebar.slider(
+        "Ani düşüş oranı (%)",
+        min_value=40, max_value=90, value=70,
+        help="Önceki kış aylarına göre bu oranda düşüş şüpheli kabul edilir"
+    )
+    min_onceki_kis_tuketim = st.sidebar.slider(
+        "Minimum önceki kış tüketimi (m³)",
+        min_value=50, max_value=200, value=100,
+        help="Ani düşüş tespiti için önceki kış aylarında minimum tüketim"
+    )
+    
+    # Analiz başlatma butonu
+    if st.sidebar.button("🔍 Anomali Analizi Başlat", type="primary"):
+        
+        # Kış ayları tanımı (Kasım, Aralık, Ocak, Şubat)
+        kis_aylari = [11, 12, 1, 2]
+        
+        # Anomali tespit fonksiyonları
+        def kis_dusukluk_anomalisi(df, esik):
+            """Kış aylarında düşük tüketim anomalisi"""
+            kis_verileri = df[df['ay'].isin(kis_aylari)]
+            anomaliler = kis_verileri[kis_verileri['tuketim_miktari'] < esik].copy()
+            anomaliler['anomali_tipi'] = 'Kış Ayı Düşük Tüketim'
+            anomaliler['aciklama'] = f'{esik} m³/ay altında kış tüketimi'
+            return anomaliler
             
-            if method == "Isolation Forest":
-                contamination = st.sidebar.slider("Anomali Oranı", 0.01, 0.3, 0.1, 0.01)
-            elif method == "Z-Score (Mevsimsel)":
-                threshold = st.sidebar.slider("Z-Score Eşiği", 1.5, 5.0, 3.0, 0.1)
+        def bina_ortalamasindan_dusuk_anomali(df, oran):
+            """Bina ortalamasından düşük tüketim anomalisi"""
+            # Her bina için ortalama tüketim hesaplama
+            bina_ortalamalari = df.groupby('baglanti_nesnesi')['tuketim_miktari'].mean().reset_index()
+            bina_ortalamalari.columns = ['baglanti_nesnesi', 'bina_ortalama']
             
-            # Tesis seçimi
-            if 'Tüketim noktası' in df.columns:
-                facilities = df['Tüketim noktası'].unique()
-                selected_facility = st.sidebar.selectbox("Tesis Seçimi (Opsiyonel)", 
-                                                        ["Tümü"] + list(facilities))
-                if selected_facility != "Tümü":
-                    df = df[df['Tüketim noktası'] == selected_facility]
+            # Veriyi bina ortalamaları ile birleştirme
+            df_with_avg = df.merge(bina_ortalamalari, on='baglanti_nesnesi')
             
-            # Anomali tespiti yap
-            if method == "Isolation Forest":
-                anomalies, scores = detect_anomalies_isolation_forest(df, contamination)
-                df['Anomali'] = anomalies
-                df['Anomali_Skoru'] = scores
-            elif method == "Z-Score (Mevsimsel)":
-                anomalies, z_scores = detect_anomalies_zscore(df, threshold)
-                df['Anomali'] = anomalies
-                df['Z_Score'] = z_scores
-            else:  # IQR
-                anomalies = detect_anomalies_iqr(df)
-                df['Anomali'] = anomalies
+            # Anomali tespiti
+            esik_deger = df_with_avg['bina_ortalama'] * (oran / 100)
+            anomaliler = df_with_avg[df_with_avg['tuketim_miktari'] < esik_deger].copy()
+            anomaliler['anomali_tipi'] = 'Bina Ortalamasından Düşük'
+            anomaliler['aciklama'] = f'Bina ortalamasından %{100-oran} daha düşük'
+            return anomaliler
             
-            # Sonuçları göster
-            col1, col2, col3, col4 = st.columns(4)
+        def ani_dusus_anomalisi(df, oran, min_tuketim):
+            """Ani düşüş anomalisi"""
+            anomaliler = []
             
-            total_records = len(df)
-            anomaly_count = len(df[df['Anomali'] == 1])
-            normal_count = total_records - anomaly_count
-            anomaly_rate = (anomaly_count / total_records) * 100
+            for tesisat in df['tuketim_noktasi'].unique():
+                tesisat_data = df[df['tuketim_noktasi'] == tesisat].sort_values('tarih')
+                
+                for yil in tesisat_data['yil'].unique():
+                    if yil == tesisat_data['yil'].min():
+                        continue  # İlk yıl için karşılaştırma yapılamaz
+                        
+                    mevcut_kis = tesisat_data[
+                        (tesisat_data['yil'] == yil) & 
+                        (tesisat_data['ay'].isin(kis_aylari))
+                    ]['tuketim_miktari'].mean()
+                    
+                    onceki_kis = tesisat_data[
+                        (tesisat_data['yil'] == yil-1) & 
+                        (tesisat_data['ay'].isin(kis_aylari))
+                    ]['tuketim_miktari'].mean()
+                    
+                    if (onceki_kis >= min_tuketim and 
+                        not pd.isna(mevcut_kis) and 
+                        not pd.isna(onceki_kis) and
+                        mevcut_kis < onceki_kis * ((100-oran)/100)):
+                        
+                        # Anomali kayıtlarını ekleme
+                        kis_kayitlari = tesisat_data[
+                            (tesisat_data['yil'] == yil) & 
+                            (tesisat_data['ay'].isin(kis_aylari))
+                        ].copy()
+                        
+                        kis_kayitlari['anomali_tipi'] = 'Ani Düşüş'
+                        kis_kayitlari['aciklama'] = f'%{oran} ani düşüş (Önceki: {onceki_kis:.1f}, Mevcut: {mevcut_kis:.1f})'
+                        anomaliler.append(kis_kayitlari)
+                        
+            return pd.concat(anomaliler) if anomaliler else pd.DataFrame()
+        
+        # Progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Anomali analizleri
+        status_text.text("🔍 Kış ayı düşük tüketim anomalileri tespit ediliyor...")
+        progress_bar.progress(25)
+        anomali_1 = kis_dusukluk_anomalisi(df, kis_tuketim_esigi)
+        
+        status_text.text("🔍 Bina ortalamasından düşük tüketim anomalileri tespit ediliyor...")
+        progress_bar.progress(50)
+        anomali_2 = bina_ortalamasindan_dusuk_anomali(df, bina_ort_dusuk_oran)
+        
+        status_text.text("🔍 Ani düşüş anomalileri tespit ediliyor...")
+        progress_bar.progress(75)
+        anomali_3 = ani_dusus_anomalisi(df, ani_dusus_orani, min_onceki_kis_tuketim)
+        
+        status_text.text("✅ Anomali analizi tamamlandı!")
+        progress_bar.progress(100)
+        
+        # Tüm anomalileri birleştirme
+        tum_anomaliler = []
+        if not anomali_1.empty:
+            tum_anomaliler.append(anomali_1)
+        if not anomali_2.empty:
+            tum_anomaliler.append(anomali_2)
+        if not anomali_3.empty:
+            tum_anomaliler.append(anomali_3)
             
+        if tum_anomaliler:
+            anomali_df = pd.concat(tum_anomaliler, ignore_index=True)
+            
+            # Sonuçları görüntüleme
+            st.header("🚨 Tespit Edilen Anomaliler")
+            
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Toplam Kayıt", total_records)
+                st.metric("Toplam Anomali", len(anomali_df))
             with col2:
-                st.metric("Normal Tüketim", normal_count)
+                st.metric("Anomalili Tesisat", anomali_df['tuketim_noktasi'].nunique())
             with col3:
-                st.metric("Anomali Sayısı", anomaly_count)
-            with col4:
-                st.metric("Anomali Oranı", f"{anomaly_rate:.1f}%")
-            
-            # Grafik gösterimi
-            st.subheader("📊 Görselleştirme")
-            fig = create_time_series_plot(df, 'Anomali')
+                st.metric("Anomali Türü", anomali_df['anomali_tipi'].nunique())
+                
+            # Anomali türleri dağılımı
+            fig = px.pie(
+                anomali_df.groupby('anomali_tipi').size().reset_index(name='count'),
+                values='count', names='anomali_tipi',
+                title="Anomali Türleri Dağılımı"
+            )
             st.plotly_chart(fig, use_container_width=True)
             
-            # Anomali detayları
-            if anomaly_count > 0:
-                st.subheader("🚨 Tespit Edilen Anomaliler")
+            # Anomalili tesisatların listesi
+            with st.expander("📋 Anomalili Tesisatlar Detayı"):
+                st.dataframe(anomali_df.sort_values('tarih'))
                 
-                anomaly_df = df[df['Anomali'] == 1].copy()
-                anomaly_df = anomaly_df.sort_values('Belge tarihi', ascending=False)
+            # Excel indirme
+            def convert_df_to_excel(df):
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, sheet_name='Anomaliler', index=False)
+                    
+                    # Özet sayfa ekleme
+                    ozet = pd.DataFrame({
+                        'Anomali Türü': anomali_df['anomali_tipi'].value_counts().index,
+                        'Adet': anomali_df['anomali_tipi'].value_counts().values
+                    })
+                    ozet.to_excel(writer, sheet_name='Özet', index=False)
+                    
+                processed_data = output.getvalue()
+                return processed_data
                 
-                # Görüntülenecek sütunları seç
-                display_cols = ['Belge tarihi', 'Sm3', 'Mevsim']
-                if 'Tüketim noktası' in anomaly_df.columns:
-                    display_cols.insert(1, 'Tüketim noktası')
-                if 'Bağlantı nesnesi' in anomaly_df.columns:
-                    display_cols.insert(-1, 'Bağlantı nesnesi')
-                
-                if method == "Isolation Forest":
-                    display_cols.append('Anomali_Skoru')
-                elif method == "Z-Score (Mevsimsel)":
-                    display_cols.append('Z_Score')
-                
-                st.dataframe(anomaly_df[display_cols], use_container_width=True)
-                
-                # Excel raporu indirme
-                excel_data = create_excel_report(df, anomaly_df)
-                st.download_button(
-                    label="📊 Detaylı Excel Raporu İndir",
-                    data=excel_data,
-                    file_name=f"dogalgaz_anomali_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            excel_data = convert_df_to_excel(anomali_df)
             
-            # Mevsimsel analiz
-            st.subheader("📈 Mevsimsel Analiz")
-            seasonal_stats = df.groupby('Mevsim').agg({
-                'Sm3': ['mean', 'std', 'count'],
-                'Anomali': lambda x: (x == 1).sum()
-            }).round(2)
-            
-            seasonal_stats.columns = ['Ortalama Tüketim', 'Standart Sapma', 'Kayıt Sayısı', 'Anomali Sayısı']
-            seasonal_stats['Anomali Oranı (%)'] = (seasonal_stats['Anomali Sayısı'] / seasonal_stats['Kayıt Sayısı'] * 100).round(1)
-            
-            st.dataframe(seasonal_stats, use_container_width=True)
-            
-            # Aylık Tüketim Trend Analizi
-            st.subheader("📊 Aylık Tüketim Trendi")
-            
-            # Aylık toplam tüketim grafiği
-            monthly_consumption = df.groupby(['Yıl', 'Ay']).agg({
-                'Sm3': 'sum',
-                'Anomali': lambda x: (x == 1).sum()
-            }).reset_index()
-            
-            monthly_consumption['Tarih'] = pd.to_datetime(
-                monthly_consumption[['Yıl', 'Ay']].assign(day=1)
+            st.download_button(
+                label="📥 Anomali Raporunu Excel Olarak İndir",
+                data=excel_data,
+                file_name=f"dogalgaz_anomaliler_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
             )
             
-            fig_monthly = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=('Aylık Toplam Tüketim', 'Aylık Anomali Sayısı'),
-                vertical_spacing=0.1
-            )
-            
-            # Aylık tüketim çizgi grafiği
-            fig_monthly.add_trace(
-                go.Scatter(
-                    x=monthly_consumption['Tarih'],
-                    y=monthly_consumption['Sm3'],
-                    mode='lines+markers',
-                    name='Aylık Tüketim',
-                    line=dict(color='blue', width=2)
-                ),
-                row=1, col=1
-            )
-            
-            # Aylık anomali çubuk grafiği
-            fig_monthly.add_trace(
-                go.Bar(
-                    x=monthly_consumption['Tarih'],
-                    y=monthly_consumption['Anomali'],
-                    name='Aylık Anomali Sayısı',
-                    marker_color='red'
-                ),
-                row=2, col=1
-            )
-            
-            fig_monthly.update_layout(height=600, showlegend=True, title_text="Aylık Analiz")
-            fig_monthly.update_xaxes(title_text="Tarih", row=2, col=1)
-            fig_monthly.update_yaxes(title_text="Tüketim (Sm3)", row=1, col=1)
-            fig_monthly.update_yaxes(title_text="Anomali Sayısı", row=2, col=1)
-            
-            st.plotly_chart(fig_monthly, use_container_width=True)
-            
-            # En yüksek anomali olan tesisatlar
-            if anomaly_count > 0:
-                st.subheader("⚠️ En Problemli Tesisatlar")
-                
-                facility_anomalies = df[df['Anomali'] == 1].groupby('Tüketim noktası').agg({
-                    'Anomali': 'count',
-                    'Sm3': ['mean', 'max'],
-                    'Belge tarihi': ['min', 'max']
-                }).round(2)
-                
-                facility_anomalies.columns = ['Anomali Sayısı', 'Ortalama Tüketim', 'Max Tüketim', 'İlk Anomali', 'Son Anomali']
-                facility_anomalies = facility_anomalies.sort_values('Anomali Sayısı', ascending=False).head(10)
-                
-                st.dataframe(facility_anomalies, use_container_width=True)
-            
-            # Metodoloji açıklaması
-            with st.expander("ℹ️ Metodoloji Hakkında"):
-                if method == "Isolation Forest":
-                    st.write("""
-                    **Isolation Forest**: Makine öğrenmesi tabanlı anomali tespit yöntemi.
-                    - Mevsimsel değişiklikleri trigonometrik özellikler ile modeller
-                    - Anomali oranı parametresi ile hassaslık ayarlanabilir
-                    - Çok boyutlu anomalileri tespit edebilir
-                    """)
-                elif method == "Z-Score (Mevsimsel)":
-                    st.write("""
-                    **Z-Score (Mevsimsel)**: İstatistiksel anomali tespit yöntemi.
-                    - Her mevsim için ayrı ortalama ve standart sapma hesaplar
-                    - Z-Score eşiği ile hassaslık ayarlanabilir
-                    - Mevsimsel değişiklikleri dikkate alır
-                    """)
-                else:
-                    st.write("""
-                    **IQR (Mevsimsel)**: Çeyrekler arası mesafe tabanlı anomali tespit.
-                    - Her mevsim için ayrı IQR hesaplar
-                    - Q1 - 1.5*IQR ve Q3 + 1.5*IQR sınırları kullanır
-                    - Robust ve anlaşılır yöntem
-                    """)
         else:
-            st.error("Veri yüklenirken bir hata oluştu. Lütfen dosya formatını kontrol edin.")
+            st.success("🎉 Belirlenen parametrelere göre herhangi bir anomali tespit edilmedi!")
+            
+        # Progress bar'ı temizleme
+        progress_bar.empty()
+        status_text.empty()
+        
+else:
+    st.info("👆 Lütfen analiz için Excel dosyanızı yükleyin.")
     
-    else:
-        st.info("👆 Lütfen Excel veya CSV dosyanızı yükleyin.")
-        st.markdown("""
-        ### 📋 Beklenen Dosya Formatı:
-        - **Dosya Türü**: Excel (.xlsx, .xls) veya CSV (.csv)
-        - **Belge tarihi**: DD.MM.YYYY formatında tarih
-        - **Tüketim noktası**: Tesis/tesisat bilgisi
-        - **Bağlantı nesnesi**: Bina numarası
-        - **Sm3**: Tüketim miktarı (sayısal değer)
-        
-        ### ⚡ Özellikler:
-        - Excel ve CSV dosya desteği
-        - Mevsimsel değişiklikleri dikkate alan akıllı anomali tespiti
-        - Üç farklı anomali tespit yöntemi
-        - İnteraktif görselleştirme
-        - **Detaylı Excel raporu** - Anomali tesisatları listesi ve istatistikler
-        
-        ### 📊 Excel Raporu İçeriği:
-        - **Anomali Tesisatları**: Tesisat bazında anomali sayıları ve özeti
-        - **Ay-Ay Tüketim**: Tesisatların aylık tüketim matrisi (pivot table)
-        - **Ay-Ay Anomali Sayısı**: Tesisatların aylık anomali matrisi
-        - **Aylık İstatistikler**: Her tesisat için aylık detaylı istatistikler
-        - **Detaylı Anomali Listesi**: Tüm anomaliler kronolojik sırayla
-        - **Mevsimsel İstatistikler**: Tesisat ve mevsim bazında analiz
-        - **Genel Özet**: Toplam istatistikler ve analiz bilgileri
-        """)
-
-if __name__ == "__main__":
-    main()
+    # Örnek veri formatı gösterimi
+    st.header("📋 Beklenen Excel Dosya Formatı")
+    
+    ornek_data = {
+        'Belge tarihi': ['01.05.2023', '01.06.2023', '01.07.2023'],
+        'Tüketim noktası': ['10843655', '10843655', '10843655'],
+        'Bağlantı nesnesi': ['100000612', '100000612', '100000612'],
+        'Tüketim miktarı': [285, 15, 8],
+        'KWH Tüketim': [2873.207, 156.45, 83.44]
+    }
+    
+    ornek_df = pd.DataFrame(ornek_data)
+    st.dataframe(ornek_df)
+    
+    st.markdown("""
+    **Gerekli Sütunlar:**
+    - **Belge tarihi**: Tüketim tarihi
+    - **Tüketim noktası**: Tesisat numarası  
+    - **Bağlantı nesnesi**: Bina numarası
+    - **Tüketim miktarı**: Aylık doğalgaz tüketimi (m³)
+    - **KWH Tüketim**: KWH cinsinden tüketim
+    """)
