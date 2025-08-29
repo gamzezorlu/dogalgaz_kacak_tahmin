@@ -262,19 +262,34 @@ if uploaded_file is not None:
         if tum_anomaliler:
             anomali_df = pd.concat(tum_anomaliler, ignore_index=True)
             
-            # Aynı tesisat ve tarih için birden fazla anomali türü varsa birleştirme
-            def anomali_birlestir(group):
-                if len(group) == 1:
-                    return group.iloc[0]
+            # Aynı tesisat için anomali özetleme (tüm ayları birleştirme)
+            def tesisat_anomali_ozeti(group):
+                ozet = group.iloc[0].copy()
+                
+                # Anomali türlerini birleştir
+                anomali_turleri = group['anomali_tipi'].unique()
+                ozet['anomali_tipi'] = ' + '.join(anomali_turleri)
+                
+                # Tarih aralığını belirle
+                tarihler = group['tarih_str'].unique()
+                if len(tarihler) == 1:
+                    ozet['tarih_str'] = tarihler[0]
                 else:
-                    # Birden fazla anomali türü varsa birleştir
-                    birlesik = group.iloc[0].copy()
-                    birlesik['anomali_tipi'] = ' + '.join(group['anomali_tipi'].unique())
-                    birlesik['aciklama'] = ' | '.join(group['aciklama'].unique())
-                    return birlesik
+                    ozet['tarih_str'] = f"{min(tarihler)} - {max(tarihler)}"
+                
+                # Tüketim istatistikleri
+                ozet['tuketim_miktari'] = group['tuketim_miktari'].mean()  # Ortalama tüketim
+                ozet['min_tuketim'] = group['tuketim_miktari'].min()
+                ozet['max_tuketim'] = group['tuketim_miktari'].max()
+                ozet['anomali_sayisi'] = len(group)
+                
+                # Açıklamayı güncelle
+                ozet['aciklama'] = f"Toplam {len(group)} anomali - {', '.join(anomali_turleri)}"
+                
+                return ozet
             
-            # Duplike kayıtları birleştirme
-            anomali_df = anomali_df.groupby(['tuketim_noktasi', 'tarih_str']).apply(anomali_birlestir).reset_index(drop=True)
+            # Tesisat bazında anomalileri özetleme
+            anomali_df = anomali_df.groupby('tuketim_noktasi').apply(tesisat_anomali_ozeti).reset_index(drop=True)
             
             # Sonuçları görüntüleme
             st.header("🚨 Tespit Edilen Anomaliler")
