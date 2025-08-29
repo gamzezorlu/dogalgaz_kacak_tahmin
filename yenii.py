@@ -192,8 +192,35 @@ def create_excel_report(df, anomaly_df):
         anomaly_summary = anomaly_summary.sort_values('Anomali Sayısı', ascending=False)
         anomaly_summary.to_excel(writer, sheet_name='Anomali Tesisatları', index=True)
         
+        # Ay-Ay Tüketim Analizi (Pivot Table)
+        df_pivot = df.pivot_table(
+            index='Tüketim noktası', 
+            columns=['Yıl', 'Ay'], 
+            values='Sm3', 
+            aggfunc='sum'
+        ).fillna(0).round(2)
+        df_pivot.to_excel(writer, sheet_name='Ay-Ay Tüketim', index=True)
+        
+        # Anomali Pivot Table
+        anomaly_pivot = df.pivot_table(
+            index='Tüketim noktası', 
+            columns=['Yıl', 'Ay'], 
+            values='Anomali', 
+            aggfunc=lambda x: (x == 1).sum()
+        ).fillna(0).astype(int)
+        anomaly_pivot.to_excel(writer, sheet_name='Ay-Ay Anomali Sayısı', index=True)
+        
+        # Tesisat bazında aylık istatistikler
+        monthly_stats = df.groupby(['Tüketim noktası', 'Yıl', 'Ay']).agg({
+            'Sm3': ['sum', 'mean', 'count'],
+            'Anomali': lambda x: (x == 1).sum()
+        }).round(2)
+        monthly_stats.columns = ['Toplam Tüketim', 'Ortalama Tüketim', 'Kayıt Sayısı', 'Anomali Sayısı']
+        monthly_stats['Anomali Var mı?'] = monthly_stats['Anomali Sayısı'].apply(lambda x: 'Evet' if x > 0 else 'Hayır')
+        monthly_stats.to_excel(writer, sheet_name='Aylık İstatistikler', index=True)
+        
         # Detaylı anomali listesi
-        detail_cols = ['Belge tarihi', 'Tüketim noktası', 'Bağlantı nesnesi', 'Sm3', 'Mevsim']
+        detail_cols = ['Belge tarihi', 'Tüketim noktası', 'Bağlantı nesnesi', 'Sm3', 'Mevsim', 'Ay', 'Yıl']
         if 'Anomali_Skoru' in anomaly_df.columns:
             detail_cols.append('Anomali_Skoru')
         if 'Z_Score' in anomaly_df.columns:
@@ -220,7 +247,9 @@ def create_excel_report(df, anomaly_df):
                 'Anomali Kayıt Sayısı',
                 'Anomalili Tesisat Sayısı',
                 'Genel Anomali Oranı (%)',
-                'Analiz Tarihi'
+                'Analiz Tarihi',
+                'Analiz Dönemi (İlk)',
+                'Analiz Dönemi (Son)'
             ],
             'Değer': [
                 len(df),
@@ -228,7 +257,9 @@ def create_excel_report(df, anomaly_df):
                 len(anomaly_df),
                 anomaly_df['Tüketim noktası'].nunique(),
                 round((len(anomaly_df) / len(df)) * 100, 2),
-                datetime.now().strftime('%d.%m.%Y %H:%M')
+                datetime.now().strftime('%d.%m.%Y %H:%M'),
+                df['Belge tarihi'].min().strftime('%d.%m.%Y'),
+                df['Belge tarihi'].max().strftime('%d.%m.%Y')
             ]
         }
         summary_df = pd.DataFrame(summary_data)
@@ -355,6 +386,70 @@ def main():
             
             st.dataframe(seasonal_stats, use_container_width=True)
             
+            # Aylık Tüketim Trend Analizi
+            st.subheader("📊 Aylık Tüketim Trendi")
+            
+            # Aylık toplam tüketim grafiği
+            monthly_consumption = df.groupby(['Yıl', 'Ay']).agg({
+                'Sm3': 'sum',
+                'Anomali': lambda x: (x == 1).sum()
+            }).reset_index()
+            
+            monthly_consumption['Tarih'] = pd.to_datetime(
+                monthly_consumption[['Yıl', 'Ay']].assign(day=1)
+            )
+            
+            fig_monthly = make_subplots(
+                rows=2, cols=1,
+                subplot_titles=('Aylık Toplam Tüketim', 'Aylık Anomali Sayısı'),
+                vertical_spacing=0.1
+            )
+            
+            # Aylık tüketim çizgi grafiği
+            fig_monthly.add_trace(
+                go.Scatter(
+                    x=monthly_consumption['Tarih'],
+                    y=monthly_consumption['Sm3'],
+                    mode='lines+markers',
+                    name='Aylık Tüketim',
+                    line=dict(color='blue', width=2)
+                ),
+                row=1, col=1
+            )
+            
+            # Aylık anomali çubuk grafiği
+            fig_monthly.add_trace(
+                go.Bar(
+                    x=monthly_consumption['Tarih'],
+                    y=monthly_consumption['Anomali'],
+                    name='Aylık Anomali Sayısı',
+                    marker_color='red'
+                ),
+                row=2, col=1
+            )
+            
+            fig_monthly.update_layout(height=600, showlegend=True, title_text="Aylık Analiz")
+            fig_monthly.update_xaxes(title_text="Tarih", row=2, col=1)
+            fig_monthly.update_yaxes(title_text="Tüketim (Sm3)", row=1, col=1)
+            fig_monthly.update_yaxes(title_text="Anomali Sayısı", row=2, col=1)
+            
+            st.plotly_chart(fig_monthly, use_container_width=True)
+            
+            # En yüksek anomali olan tesisatlar
+            if anomaly_count > 0:
+                st.subheader("⚠️ En Problemli Tesisatlar")
+                
+                facility_anomalies = df[df['Anomali'] == 1].groupby('Tüketim noktası').agg({
+                    'Anomali': 'count',
+                    'Sm3': ['mean', 'max'],
+                    'Belge tarihi': ['min', 'max']
+                }).round(2)
+                
+                facility_anomalies.columns = ['Anomali Sayısı', 'Ortalama Tüketim', 'Max Tüketim', 'İlk Anomali', 'Son Anomali']
+                facility_anomalies = facility_anomalies.sort_values('Anomali Sayısı', ascending=False).head(10)
+                
+                st.dataframe(facility_anomalies, use_container_width=True)
+            
             # Metodoloji açıklaması
             with st.expander("ℹ️ Metodoloji Hakkında"):
                 if method == "Isolation Forest":
@@ -400,6 +495,9 @@ def main():
         
         ### 📊 Excel Raporu İçeriği:
         - **Anomali Tesisatları**: Tesisat bazında anomali sayıları ve özeti
+        - **Ay-Ay Tüketim**: Tesisatların aylık tüketim matrisi (pivot table)
+        - **Ay-Ay Anomali Sayısı**: Tesisatların aylık anomali matrisi
+        - **Aylık İstatistikler**: Her tesisat için aylık detaylı istatistikler
         - **Detaylı Anomali Listesi**: Tüm anomaliler kronolojik sırayla
         - **Mevsimsel İstatistikler**: Tesisat ve mevsim bazında analiz
         - **Genel Özet**: Toplam istatistikler ve analiz bilgileri
