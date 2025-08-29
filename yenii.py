@@ -30,33 +30,34 @@ if uploaded_file is not None:
         # Excel dosyasını okuma
         df = pd.read_excel(uploaded_file)
         
-        # Sütun adlarını temizleme ve küçük harfe çevirme
-        df.columns = df.columns.astype(str).str.strip().str.lower()
+        # Sütun adlarını temizleme (büyük/küçük harf ve boşluk hassasiyetini kaldırmak için)
+        df.columns = df.columns.astype(str).str.strip()
+        
+        # Sütun adlarını normalize etme fonksiyonu
+        def normalize_column_name(col_name):
+            return col_name.lower().replace('ı', 'i').replace('ğ', 'g').replace('ü', 'u').replace('ö', 'o').replace('ş', 's').replace('ç', 'c').strip()
         
         # Gerekli sütunları bulma ve eşleme
         sutun_esleme = {}
-        gerekli_sutunlar = {
-            'tuketim_noktasi': ['tüketim noktası', 'tuketim noktasi', 'tesisat', 'tn'],
-            'baglanti_nesnesi': ['bağlantı nesnesi', 'baglanti nesnesi', 'bina', 'bn'],
-            'belge_tarihi': ['belge tarihi', 'tarih', 'date'],
-            'sm3': ['sm3', 'sm³', 'tuketim', 'tüketim', 'miktar']
-        }
         
-        # Her gerekli sütun için eşleşen sütunu bulma
-        for hedef_sutun, aranacak_isimler in gerekli_sutunlar.items():
-            sutun_bulundu = False
-            for sutun in df.columns:
-                for aranan in aranacak_isimler:
-                    if aranan in sutun:
-                        sutun_esleme[hedef_sutun] = sutun
-                        sutun_bulundu = True
-                        break
-                if sutun_bulundu:
-                    break
+        # Her sütunu normalize ederek kontrol etme
+        for col in df.columns:
+            col_normalized = normalize_column_name(col)
+            
+            if 'tuketim' in col_normalized and 'nokta' in col_normalized:
+                sutun_esleme['tuketim_noktasi'] = col
+            elif 'baglanti' in col_normalized and 'nesne' in col_normalized:
+                sutun_esleme['baglanti_nesnesi'] = col
+            elif 'belge' in col_normalized and 'tarih' in col_normalized:
+                sutun_esleme['belge_tarihi'] = col
+            elif col_normalized in ['sm3', 'sm³']:
+                sutun_esleme['sm3'] = col
         
         # Eksik sütunları kontrol etme
+        gerekli_alanlar = ['tuketim_noktasi', 'baglanti_nesnesi', 'belge_tarihi', 'sm3']
         eksik_sutunlar = []
-        for gerekli in gerekli_sutunlar.keys():
+        
+        for gerekli in gerekli_alanlar:
             if gerekli not in sutun_esleme:
                 eksik_sutunlar.append(gerekli)
         
@@ -64,13 +65,13 @@ if uploaded_file is not None:
             st.error(f"❌ Şu sütunlar bulunamadı: {', '.join(eksik_sutunlar)}")
             st.info("📋 Mevcut sütunlar:")
             for i, col in enumerate(df.columns, 1):
-                st.write(f"{i}. {col}")
+                st.write(f"{i}. **{col}**")
             
-            st.info("💡 Beklenen sütun isimleri:")
-            st.write("• **Tüketim Noktası** (veya TN, Tesisat)")
-            st.write("• **Bağlantı Nesnesi** (veya BN, Bina)")  
-            st.write("• **Belge Tarihi** (veya Tarih)")
-            st.write("• **SM3** (veya SM³, Tüketim, Miktar)")
+            st.info("💡 Beklenen sütun isimleri (tam eşleşme):")
+            st.write("• **Tüketim noktası**")
+            st.write("• **Bağlantı nesnesi**")  
+            st.write("• **Belge tarihi**")
+            st.write("• **Sm3**")
             st.stop()
         
         # Sütun adlarını standartlaştırma
