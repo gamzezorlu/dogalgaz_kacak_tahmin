@@ -30,41 +30,69 @@ if uploaded_file is not None:
         # Excel dosyasını okuma
         df = pd.read_excel(uploaded_file)
         
-        # Sütun adlarını standartlaştırma
-        column_mapping = {
-            'Belge tarihi': 'tarih',
-            'Tüketim noktası': 'tuketim_noktasi', 
-            'Bağlantı nesnesi': 'baglanti_nesnesi',
-            'Tüketim miktarı': 'tuketim_miktari',
-            'KWH Tüketim': 'kwh_tuketim'
-        }
+        # Sütun adlarını temizleme ve standartlaştırma
+        df.columns = df.columns.astype(str).str.strip()
         
-        # Sütun adlarını eşleştirme
-        df.columns = df.columns.str.strip()
-        for old_name, new_name in column_mapping.items():
-            if old_name in df.columns:
-                df = df.rename(columns={old_name: new_name})
+        # Olası sütun adlarını eşleştirme (çok esnek yaklaşım)
+        column_mapping = {}
+        
+        for col in df.columns:
+            col_lower = col.lower().strip()
+            if any(x in col_lower for x in ['belge', 'tarih', 'date']):
+                column_mapping[col] = 'tarih'
+            elif any(x in col_lower for x in ['tüketim nokta', 'tuketim nokta', 'tesisat', 'consumption point']):
+                column_mapping[col] = 'tuketim_noktasi'
+            elif any(x in col_lower for x in ['bağlantı nesne', 'baglanti nesne', 'bina', 'building']):
+                column_mapping[col] = 'baglanti_nesnesi'
+            elif any(x in col_lower for x in ['tüketim mik', 'tuketim mik', 'sm3', 'consumption']):
+                column_mapping[col] = 'tuketim_miktari'
+            elif any(x in col_lower for x in ['kwh', 'kw']):
+                column_mapping[col] = 'kwh_tuketim'
+        
+        # Sütun adlarını değiştirme
+        df = df.rename(columns=column_mapping)
+        
+        # Gerekli sütunların varlığını kontrol etme
+        required_columns = ['tarih', 'tuketim_noktasi', 'baglanti_nesnesi', 'tuketim_miktari']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            st.error(f"❌ Eksik sütunlar: {missing_columns}")
+            st.info("Mevcut sütunlar:")
+            st.write(list(df.columns))
+            st.stop()
         
         # Tarih sütununu datetime'a çevirme
-        if 'tarih' in df.columns:
-            df['tarih'] = pd.to_datetime(df['tarih'])
-            df['yil'] = df['tarih'].dt.year
-            df['ay'] = df['tarih'].dt.month
-            df['ay_ad'] = df['tarih'].dt.strftime('%B')
+        df['tarih'] = pd.to_datetime(df['tarih'], errors='coerce')
+        df = df.dropna(subset=['tarih'])  # Geçersiz tarihleri kaldır
+        df['yil'] = df['tarih'].dt.year
+        df['ay'] = df['tarih'].dt.month
+        df['ay_ad'] = df['tarih'].dt.strftime('%B')
+        
+        # Tüketim değerlerini sayısal hale getirme
+        df['tuketim_miktari'] = pd.to_numeric(df['tuketim_miktari'], errors='coerce')
+        df = df.dropna(subset=['tuketim_miktari'])  # Geçersiz tüketim değerlerini kaldır
         
         st.success(f"✅ Dosya başarıyla yüklendi! {len(df)} satır veri okundu.")
         
         # Veri önizlemesi
         with st.expander("📊 Veri Önizlemesi"):
             st.dataframe(df.head(10))
+            st.info(f"Sütunlar: {list(df.columns)}")
             
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Toplam Kayıt", len(df))
         with col2:
-            st.metric("Tesisat Sayısı", df['tuketim_noktasi'].nunique())
+            if 'tuketim_noktasi' in df.columns:
+                st.metric("Tesisat Sayısı", df['tuketim_noktasi'].nunique())
+            else:
+                st.metric("Tesisat Sayısı", "N/A")
         with col3:
-            st.metric("Bina Sayısı", df['baglanti_nesnesi'].nunique())
+            if 'baglanti_nesnesi' in df.columns:
+                st.metric("Bina Sayısı", df['baglanti_nesnesi'].nunique())
+            else:
+                st.metric("Bina Sayısı", "N/A")
             
     except Exception as e:
         st.error(f"❌ Dosya okuma hatası: {str(e)}")
@@ -73,7 +101,7 @@ if uploaded_file is not None:
     # Parametreler bölümü
     st.sidebar.header("⚙️ Analiz Parametreleri")
     kis_tuketim_esigi = st.sidebar.slider(
-        "Kış ayı düşük tüketim eşiği (m³/ay)",
+        "Kış ayı düşük tüketim eşiği (sm³/ay)",
         min_value=10, max_value=100, value=30,
         help="Kış aylarında bu değerin altındaki tüketim şüpheli kabul edilir"
     )
@@ -88,7 +116,7 @@ if uploaded_file is not None:
         help="Önceki kış aylarına göre bu oranda düşüş şüpheli kabul edilir"
     )
     min_onceki_kis_tuketim = st.sidebar.slider(
-        "Minimum önceki kış tüketimi (m³)",
+        "Minimum önceki kış tüketimi (sm³)",
         min_value=50, max_value=200, value=100,
         help="Ani düşüş tespiti için önceki kış aylarında minimum tüketim"
     )
@@ -102,14 +130,24 @@ if uploaded_file is not None:
         # Anomali tespit fonksiyonları
         def kis_dusukluk_anomalisi(df, esik):
             """Kış aylarında düşük tüketim anomalisi"""
+            if 'tuketim_miktari' not in df.columns:
+                return pd.DataFrame()
+                
             kis_verileri = df[df['ay'].isin(kis_aylari)]
+            if kis_verileri.empty:
+                return pd.DataFrame()
+                
             anomaliler = kis_verileri[kis_verileri['tuketim_miktari'] < esik].copy()
-            anomaliler['anomali_tipi'] = 'Kış Ayı Düşük Tüketim'
-            anomaliler['aciklama'] = f'{esik} m³/ay altında kış tüketimi'
+            if not anomaliler.empty:
+                anomaliler['anomali_tipi'] = 'Kış Ayı Düşük Tüketim'
+                anomaliler['aciklama'] = f'{esik} sm³/ay altında kış tüketimi'
             return anomaliler
             
         def bina_ortalamasindan_dusuk_anomali(df, oran):
             """Bina ortalamasından düşük tüketim anomalisi"""
+            if 'tuketim_miktari' not in df.columns or 'baglanti_nesnesi' not in df.columns:
+                return pd.DataFrame()
+                
             # Her bina için ortalama tüketim hesaplama
             bina_ortalamalari = df.groupby('baglanti_nesnesi')['tuketim_miktari'].mean().reset_index()
             bina_ortalamalari.columns = ['baglanti_nesnesi', 'bina_ortalama']
@@ -120,12 +158,17 @@ if uploaded_file is not None:
             # Anomali tespiti
             esik_deger = df_with_avg['bina_ortalama'] * (oran / 100)
             anomaliler = df_with_avg[df_with_avg['tuketim_miktari'] < esik_deger].copy()
-            anomaliler['anomali_tipi'] = 'Bina Ortalamasından Düşük'
-            anomaliler['aciklama'] = f'Bina ortalamasından %{100-oran} daha düşük'
+            
+            if not anomaliler.empty:
+                anomaliler['anomali_tipi'] = 'Bina Ortalamasından Düşük'
+                anomaliler['aciklama'] = f'Bina ortalamasından %{100-oran} daha düşük'
             return anomaliler
             
         def ani_dusus_anomalisi(df, oran, min_tuketim):
             """Ani düşüş anomalisi"""
+            if 'tuketim_miktari' not in df.columns or 'tuketim_noktasi' not in df.columns:
+                return pd.DataFrame()
+                
             anomaliler = []
             
             for tesisat in df['tuketim_noktasi'].unique():
@@ -156,11 +199,12 @@ if uploaded_file is not None:
                             (tesisat_data['ay'].isin(kis_aylari))
                         ].copy()
                         
-                        kis_kayitlari['anomali_tipi'] = 'Ani Düşüş'
-                        kis_kayitlari['aciklama'] = f'%{oran} ani düşüş (Önceki: {onceki_kis:.1f}, Mevcut: {mevcut_kis:.1f})'
-                        anomaliler.append(kis_kayitlari)
+                        if not kis_kayitlari.empty:
+                            kis_kayitlari['anomali_tipi'] = 'Ani Düşüş'
+                            kis_kayitlari['aciklama'] = f'%{oran} ani düşüş (Önceki: {onceki_kis:.1f}, Mevcut: {mevcut_kis:.1f})'
+                            anomaliler.append(kis_kayitlari)
                         
-            return pd.concat(anomaliler) if anomaliler else pd.DataFrame()
+            return pd.concat(anomaliler, ignore_index=True) if anomaliler else pd.DataFrame()
         
         # Progress bar
         progress_bar = st.progress(0)
@@ -272,6 +316,8 @@ else:
     - **Belge tarihi**: Tüketim tarihi
     - **Tüketim noktası**: Tesisat numarası  
     - **Bağlantı nesnesi**: Bina numarası
-    - **Tüketim miktarı**: Aylık doğalgaz tüketimi (m³)
-    - **KWH Tüketim**: KWH cinsinden tüketim
+    - **Tüketim miktarı**: Aylık doğalgaz tüketimi (sm³ - standart metreküp)
+    - **KWH Tüketim**: KWH cinsinden tüketim (opsiyonel)
+    
+    **Not:** Sütun adları esnek olarak tanınır. "sm3", "Tüketim Mik", "Tuketim Nokta" gibi varyasyonlar da kabul edilir.
     """)
