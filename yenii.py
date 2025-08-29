@@ -177,6 +177,66 @@ def create_time_series_plot(df, anomalies_col):
     
     return fig
 
+def create_excel_report(df, anomaly_df):
+    """Excel raporu oluştur"""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Anomali tesisatları (ana rapor)
+        anomaly_summary = anomaly_df.groupby('Tüketim noktası').agg({
+            'Sm3': ['count', 'mean', 'min', 'max'],
+            'Belge tarihi': ['min', 'max']
+        }).round(2)
+        
+        anomaly_summary.columns = ['Anomali Sayısı', 'Ortalama Tüketim', 'Min Tüketim', 'Max Tüketim', 'İlk Anomali', 'Son Anomali']
+        anomaly_summary = anomaly_summary.sort_values('Anomali Sayısı', ascending=False)
+        anomaly_summary.to_excel(writer, sheet_name='Anomali Tesisatları', index=True)
+        
+        # Detaylı anomali listesi
+        detail_cols = ['Belge tarihi', 'Tüketim noktası', 'Bağlantı nesnesi', 'Sm3', 'Mevsim']
+        if 'Anomali_Skoru' in anomaly_df.columns:
+            detail_cols.append('Anomali_Skoru')
+        if 'Z_Score' in anomaly_df.columns:
+            detail_cols.append('Z_Score')
+            
+        anomaly_detail = anomaly_df[detail_cols].copy()
+        anomaly_detail = anomaly_detail.sort_values(['Tüketim noktası', 'Belge tarihi'])
+        anomaly_detail.to_excel(writer, sheet_name='Detaylı Anomali Listesi', index=False)
+        
+        # Mevsimsel istatistikler
+        seasonal_stats = df.groupby(['Tüketim noktası', 'Mevsim']).agg({
+            'Sm3': ['mean', 'std', 'count'],
+            'Anomali': lambda x: (x == 1).sum()
+        }).round(2)
+        seasonal_stats.columns = ['Ortalama', 'Std Sapma', 'Kayıt Sayısı', 'Anomali Sayısı']
+        seasonal_stats['Anomali Oranı (%)'] = (seasonal_stats['Anomali Sayısı'] / seasonal_stats['Kayıt Sayısı'] * 100).round(1)
+        seasonal_stats.to_excel(writer, sheet_name='Mevsimsel İstatistikler', index=True)
+        
+        # Genel özet
+        summary_data = {
+            'Metrik': [
+                'Toplam Kayıt Sayısı',
+                'Toplam Tesisat Sayısı', 
+                'Anomali Kayıt Sayısı',
+                'Anomalili Tesisat Sayısı',
+                'Genel Anomali Oranı (%)',
+                'Analiz Tarihi'
+            ],
+            'Değer': [
+                len(df),
+                df['Tüketim noktası'].nunique(),
+                len(anomaly_df),
+                anomaly_df['Tüketim noktası'].nunique(),
+                round((len(anomaly_df) / len(df)) * 100, 2),
+                datetime.now().strftime('%d.%m.%Y %H:%M')
+            ]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='Genel Özet', index=False)
+    
+    output.seek(0)
+    return output
+
 def main():
     st.set_page_config(page_title="Doğalgaz Anomali Tespit Sistemi", layout="wide")
     
@@ -282,66 +342,6 @@ def main():
                     file_name=f"dogalgaz_anomali_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
-def create_excel_report(df, anomaly_df):
-    """Excel raporu oluştur"""
-    output = io.BytesIO()
-    
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Anomali tesisatları (ana rapor)
-        anomaly_summary = anomaly_df.groupby('Tüketim noktası').agg({
-            'Sm3': ['count', 'mean', 'min', 'max'],
-            'Belge tarihi': ['min', 'max']
-        }).round(2)
-        
-        anomaly_summary.columns = ['Anomali Sayısı', 'Ortalama Tüketim', 'Min Tüketim', 'Max Tüketim', 'İlk Anomali', 'Son Anomali']
-        anomaly_summary = anomaly_summary.sort_values('Anomali Sayısı', ascending=False)
-        anomaly_summary.to_excel(writer, sheet_name='Anomali Tesisatları', index=True)
-        
-        # Detaylı anomali listesi
-        detail_cols = ['Belge tarihi', 'Tüketim noktası', 'Bağlantı nesnesi', 'Sm3', 'Mevsim']
-        if 'Anomali_Skoru' in anomaly_df.columns:
-            detail_cols.append('Anomali_Skoru')
-        if 'Z_Score' in anomaly_df.columns:
-            detail_cols.append('Z_Score')
-            
-        anomaly_detail = anomaly_df[detail_cols].copy()
-        anomaly_detail = anomaly_detail.sort_values(['Tüketim noktası', 'Belge tarihi'])
-        anomaly_detail.to_excel(writer, sheet_name='Detaylı Anomali Listesi', index=False)
-        
-        # Mevsimsel istatistikler
-        seasonal_stats = df.groupby(['Tüketim noktası', 'Mevsim']).agg({
-            'Sm3': ['mean', 'std', 'count'],
-            'Anomali': lambda x: (x == 1).sum()
-        }).round(2)
-        seasonal_stats.columns = ['Ortalama', 'Std Sapma', 'Kayıt Sayısı', 'Anomali Sayısı']
-        seasonal_stats['Anomali Oranı (%)'] = (seasonal_stats['Anomali Sayısı'] / seasonal_stats['Kayıt Sayısı'] * 100).round(1)
-        seasonal_stats.to_excel(writer, sheet_name='Mevsimsel İstatistikler', index=True)
-        
-        # Genel özet
-        summary_data = {
-            'Metrik': [
-                'Toplam Kayıt Sayısı',
-                'Toplam Tesisat Sayısı', 
-                'Anomali Kayıt Sayısı',
-                'Anomalili Tesisat Sayısı',
-                'Genel Anomali Oranı (%)',
-                'Analiz Tarihi'
-            ],
-            'Değer': [
-                len(df),
-                df['Tüketim noktası'].nunique(),
-                len(anomaly_df),
-                anomaly_df['Tüketim noktası'].nunique(),
-                round((len(anomaly_df) / len(df)) * 100, 2),
-                datetime.now().strftime('%d.%m.%Y %H:%M')
-            ]
-        }
-        summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='Genel Özet', index=False)
-    
-    output.seek(0)
-    return output
             
             # Mevsimsel analiz
             st.subheader("📈 Mevsimsel Analiz")
