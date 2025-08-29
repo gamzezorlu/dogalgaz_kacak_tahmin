@@ -5,3 +5,4 @@ plotly
 openpyxl
 xlrd
 scikit-learn
+xlsxwriter
