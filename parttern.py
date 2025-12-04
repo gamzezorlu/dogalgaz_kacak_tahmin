@@ -1,514 +1,436 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import StandardScaler
-import plotly.express as px
-import plotly.graph_objects as go
-from io import BytesIO
-import warnings
-warnings.filterwarnings('ignore')
+from datetime import datetime
+import io
 
-st.set_page_config(page_title="Doğalgaz Kaçak Kullanım Tespit", page_icon="⚠️", layout="wide")
+st.set_page_config(page_title="Doğalgaz Kaçak Tespit", page_icon="🔥", layout="wide")
 
-class GasFraudDetector:
-    """
-    Doğalgaz kaçak kullanım anomali tespit sistemi
-    
-    VERİDEKİ PATTERN ANALİZİ:
-    -------------------------
-    Yüklediğiniz PDF'deki verilerde şu patternleri tespit ettim:
-    
-    1. SIKÇA SIFIR TÜKETİM: Bazı tesisatlar uzun süre 0 değer gösteriyor
-       Örnek: Tesisat 10100311, 10109574, 10219911 - aylarca 0 tüketim
-       → Bu ANORMAL: Ev boş değilse sayaca müdahale şüphesi
-    
-    2. ANİ DÜŞÜŞLER: Normal tüketimden aniden çok düşük değerlere düşüş
-       Örnek: Tesisat 10004494 → 165 tondan 19 tona düşmüş (90% düşüş)
-       → Sayaç manipülasyonu işareti
-    
-    3. UZUN SÜRELİ DÜŞÜK TÜKETİM: 10+ ay boyunca çok düşük değerler
-       Örnek: Tesisat 10410643, 10415131 - sürekli 0-5 ton arası
-       → Kaçak kullanım paterni
-    
-    4. AŞİRİ DEĞİŞKENLİK: Bir ay 200, bir ay 5, bir ay 300
-       → Tutarsız, şüpheli davranış
-    
-    5. MEVSİMSEL ANORMALLIK: Kış-yaz farkı olmaması
-       → Normal evlerde kışın 3-4 kat fazla tüketim olmalı
-    """
-    
-    def __init__(self, contamination=0.15):
-        self.contamination = contamination
-        self.scaler = StandardScaler()
-        self.model = IsolationForest(contamination=contamination, random_state=42, n_estimators=100)
-        
-    def load_excel(self, uploaded_file):
-        """Excel/CSV dosyasını yükle"""
-        try:
-            # Excel ise
-            if uploaded_file.name.endswith('.xlsx') or uploaded_file.name.endswith('.xls'):
-                df = pd.read_excel(uploaded_file, header=None)
-            # CSV ise
-            else:
-                # Boşlukla ayrılmış format
-                df = pd.read_csv(uploaded_file, sep=r'\s+', header=None, engine='python')
-            
-            # İlk sütun tesisat ID'si
-            self.facility_ids = df.iloc[:, 0].astype(str).values
-            # Diğer sütunlar tüketim değerleri
-            self.consumption_data = df.iloc[:, 1:].apply(pd.to_numeric, errors='coerce').values
-            
-            return df
-        except Exception as e:
-            st.error(f"Dosya yükleme hatası: {str(e)}")
-            return None
-    
-    def extract_features(self):
-        """
-        Kaçak kullanım patternlerini tespit etmek için özellikler çıkar
-        
-        ÇIKARILAN ÖZELLİKLER:
-        1. Sıfır tüketim oranı (en önemli)
-        2. Ani düşüş sayısı
-        3. Maksimum düşüş yüzdesi
-        4. Ardışık düşük tüketim ay sayısı
-        5. Tüketim değişkenliği (düzensizlik)
-        6. Negatif trend dönem sayısı
-        7. Mevsimsel düzensizlik
-        """
-        features = []
-        
-        progress_bar = st.progress(0)
-        total = len(self.consumption_data)
-        
-        for i, row in enumerate(self.consumption_data):
-            progress_bar.progress((i + 1) / total)
-            
-            # NaN değerleri temizle
-            row_clean = row[~np.isnan(row)]
-            row_clean = row_clean[row_clean >= 0]  # Negatif değerleri de temizle
-            
-            if len(row_clean) == 0:
-                continue
-            
-            # Sıfır olmayan değerler
-            row_nonzero = row_clean[row_clean > 0]
-            
-            if len(row_nonzero) == 0:
-                row_nonzero = np.array([0.001])  # Tüm değerler sıfırsa
-                
-            feature_dict = {
-                'facility_id': self.facility_ids[i],
-                
-                # 1. SIFIR/DÜŞÜK TÜKETİM ANALİZİ (EN ÖNEMLİ!)
-                'zero_count': int(np.sum(row_clean == 0)),
-                'zero_ratio': float(np.sum(row_clean == 0) / len(row_clean)),
-                'low_consumption_count': int(np.sum(row_clean < 5)),
-                'low_consumption_ratio': float(np.sum(row_clean < 5) / len(row_clean)),
-                
-                # 2. ANİ DEĞİŞİMLER
-                'sudden_drops': int(self._count_sudden_changes(row_clean, threshold=0.5, direction='down')),
-                'sudden_spikes': int(self._count_sudden_changes(row_clean, threshold=0.8, direction='up')),
-                'max_drop_percentage': float(self._max_change_ratio(row_clean, direction='down') * 100),
-                'max_spike_percentage': float(self._max_change_ratio(row_clean, direction='up') * 100),
-                
-                # 3. UZUN SÜRELİ DÜŞÜK TÜKETİM
-                'consecutive_zero_months': int(self._max_consecutive(row_clean, value=0)),
-                'consecutive_low_months': int(self._max_consecutive_low(row_clean, threshold=10)),
-                
-                # 4. TEMEL İSTATİSTİKLER
-                'mean_consumption': float(np.mean(row_nonzero)),
-                'std_consumption': float(np.std(row_nonzero)),
-                'median_consumption': float(np.median(row_nonzero)),
-                'max_consumption': float(np.max(row_nonzero)),
-                'min_consumption': float(np.min(row_nonzero)),
-                
-                # 5. DEĞİŞKENLİK
-                'coefficient_of_variation': float(np.std(row_nonzero) / np.mean(row_nonzero) if np.mean(row_nonzero) > 0 else 0),
-                'range_ratio': float((np.max(row_nonzero) - np.min(row_nonzero)) / np.mean(row_nonzero) if np.mean(row_nonzero) > 0 else 0),
-                
-                # 6. TREND ANALİZİ
-                'overall_trend': float(self._calculate_trend(row_nonzero)),
-                'negative_trend_periods': int(self._count_negative_trends(row_clean)),
-                
-                # 7. MEVSİMSEL ANORMALLIK
-                'seasonal_variation': float(self._calculate_seasonal_variation(row_clean)),
-                'missing_winter_peak': int(self._check_missing_winter_peak(row_clean)),
-            }
-            
-            features.append(feature_dict)
-        
-        progress_bar.empty()
-        return pd.DataFrame(features)
-    
-    def _count_sudden_changes(self, data, threshold=0.5, direction='down'):
-        """Ani değişim sayısı"""
-        if len(data) < 2:
-            return 0
-        changes = np.diff(data) / (data[:-1] + 0.001)
-        if direction == 'down':
-            return np.sum(changes < -threshold)
-        else:
-            return np.sum(changes > threshold)
-    
-    def _max_change_ratio(self, data, direction='down'):
-        """Maksimum değişim oranı"""
-        if len(data) < 2:
-            return 0
-        changes = np.diff(data) / (data[:-1] + 0.001)
-        if direction == 'down':
-            return abs(np.min(changes)) if len(changes) > 0 else 0
-        else:
-            return np.max(changes) if len(changes) > 0 else 0
-    
-    def _max_consecutive(self, data, value=0):
-        """Ardışık belirli değer sayısı"""
-        count = 0
-        max_count = 0
-        for val in data:
-            if val == value:
-                count += 1
-                max_count = max(max_count, count)
-            else:
-                count = 0
-        return max_count
-    
-    def _max_consecutive_low(self, data, threshold=10):
-        """Ardışık düşük tüketim periyodu"""
-        count = 0
-        max_count = 0
-        for val in data:
-            if val < threshold:
-                count += 1
-                max_count = max(max_count, count)
-            else:
-                count = 0
-        return max_count
-    
-    def _calculate_trend(self, data):
-        """Genel trend"""
-        if len(data) < 2:
-            return 0
-        x = np.arange(len(data))
-        return np.polyfit(x, data, 1)[0]
-    
-    def _count_negative_trends(self, data, window=6):
-        """Negatif trend dönem sayısı"""
-        if len(data) < window:
-            return 0
-        count = 0
-        for i in range(len(data) - window + 1):
-            window_data = data[i:i+window]
-            if self._calculate_trend(window_data) < -1:
-                count += 1
-        return count
-    
-    def _calculate_seasonal_variation(self, data):
-        """Mevsimsel varyasyon (kış-yaz farkı)"""
-        if len(data) < 12:
-            return 0
-        # 12 aylık periyotlara böl
-        years = len(data) // 12
-        if years == 0:
-            return 0
-        
-        variations = []
-        for year in range(years):
-            year_data = data[year*12:(year+1)*12]
-            if len(year_data) == 12:
-                winter = np.mean([year_data[11], year_data[0], year_data[1]])  # Aralık, Ocak, Şubat
-                summer = np.mean([year_data[5], year_data[6], year_data[7]])   # Haziran, Temmuz, Ağustos
-                if summer > 0:
-                    variations.append((winter - summer) / summer)
-        
-        return np.mean(variations) if len(variations) > 0 else 0
-    
-    def _check_missing_winter_peak(self, data):
-        """Kış zirvesi eksikliği kontrolü"""
-        if len(data) < 12:
-            return 0
-        years = len(data) // 12
-        missing_count = 0
-        
-        for year in range(years):
-            year_data = data[year*12:(year+1)*12]
-            if len(year_data) == 12:
-                winter_avg = np.mean([year_data[11], year_data[0], year_data[1]])
-                summer_avg = np.mean([year_data[5], year_data[6], year_data[7]])
-                # Normal evlerde kış en az 1.5 kat fazla olmalı
-                if winter_avg < summer_avg * 1.2:
-                    missing_count += 1
-        
-        return missing_count
-    
-    def calculate_risk_score(self, features_df):
-        """
-        Kaçak kullanım risk skoru hesapla
-        
-        AĞIRLIKLAR (verimizdeki patternlere göre):
-        - Sıfır tüketim oranı: x100 (en önemli!)
-        - Ardışık sıfır aylar: x20
-        - Ani düşüş: x15
-        - Düşük tüketim oranı: x50
-        """
-        risk = np.zeros(len(features_df))
-        
-        # 1. Sıfır tüketim (ÇOK ÖNEMLİ!)
-        risk += features_df['zero_ratio'] * 100
-        risk += features_df['consecutive_zero_months'] * 20
-        
-        # 2. Düşük tüketim
-        risk += features_df['low_consumption_ratio'] * 50
-        risk += features_df['consecutive_low_months'] * 10
-        
-        # 3. Ani düşüşler
-        risk += features_df['sudden_drops'] * 15
-        risk += features_df['max_drop_percentage'] / 10
-        
-        # 4. Negatif trendler
-        risk += features_df['negative_trend_periods'] * 12
-        
-        # 5. Mevsimsel anormallik
-        risk += features_df['missing_winter_peak'] * 8
-        
-        # 6. Yüksek değişkenlik
-        risk += features_df['coefficient_of_variation'] * 5
-        
-        return risk
-    
-    def detect_anomalies(self, features_df):
-        """Anomali tespiti"""
-        facility_ids = features_df['facility_id'].values
-        feature_columns = features_df.drop('facility_id', axis=1)
-        
-        # Normalizasyon
-        features_scaled = self.scaler.fit_transform(feature_columns)
-        
-        # ML modeli ile anomali tespiti
-        predictions = self.model.fit_predict(features_scaled)
-        anomaly_scores = self.model.score_samples(features_scaled)
-        
-        # Sonuçlar
-        results = features_df.copy()
-        results['is_anomaly'] = predictions == -1
-        results['ml_anomaly_score'] = -anomaly_scores
-        results['risk_score'] = self.calculate_risk_score(features_df)
-        
-        # Risk seviyesi
-        results['risk_level'] = pd.cut(results['risk_score'], 
-                                       bins=[-np.inf, 20, 50, 100, np.inf],
-                                       labels=['Düşük', 'Orta', 'Yüksek', 'Çok Yüksek'])
-        
-        return results.sort_values('risk_score', ascending=False)
+# Başlık
+st.title("🔥 Doğalgaz Kaçak Kullanım Tespit Sistemi")
+st.markdown("---")
 
-
-def create_excel_download(df):
-    """Excel indirme butonu oluştur"""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Anomali Tespiti')
-    output.seek(0)
-    return output
-
-
-def main():
-    st.title("⚠️ Doğalgaz Kaçak Kullanım Anomali Tespit Sistemi")
-    
+# Sidebar - Açıklamalar
+with st.sidebar:
+    st.header("📋 Kullanım Kılavuzu")
     st.markdown("""
-    ### 📊 Sistem Nasıl Çalışır?
+    ### Excel Formatı:
+    - **Abone_ID**: Abone numarası
+    - **Tarife**: Isınma/Mutfak
+    - **Ocak, Şubat, ... Aralık**: Aylık tüketim (m³)
     
-    **Verinizdeki şüpheli patternleri tespit eder:**
-    
-    1. **Sıfır/Düşük Tüketim**: Uzun süre sıfır veya çok düşük tüketim (sayaç manipülasyonu)
-    2. **Ani Düşüşler**: Normal tüketimden aniden %50+ düşüş
-    3. **Uzun Süreli Düşük Dönemler**: 6+ ay boyunca düşük tüketim
-    4. **Mevsimsel Anormallik**: Kış-yaz farkı olmaması (normal evlerde kış 2-3x fazla)
-    5. **Düzensizlik**: Tutarsız, aşırı değişken tüketim paterni
-    
-    ---
+    ### Tespit Kuralları:
+    1. ❄️ Kışın Yaz Modu
+    2. 📉 Ani Düşüş
+    3. 🚫 Sıfır Tüketim
+    4. 📊 Volatilite (Zikzak)
+    5. ⚡ Baz Yük Altı
+    6. 🌡️ Yaz-Kış Oranı
+    7. 📏 Sabit Tüketim
+    8. 📅 Yıllık Karşılaştırma
+    9. 💥 Geri Dönüş Patlaması
+    10. 📍 Komşu Sapması
+    11. ❄️ Kış Düşük
+    12. 📈 Trend Kırılması
     """)
     
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Ayarlar")
-        contamination = st.slider(
-            "Beklenen Anomali Oranı (%)",
-            min_value=5,
-            max_value=30,
-            value=15,
-            help="Verinizdeki kaçak kullanım oranı tahmini. Daha yüksek değer = daha fazla tespit"
-        ) / 100
+    st.markdown("---")
+    st.info("💡 Risk Skoru >60: Yüksek Riskli")
+
+# Dosya yükleme
+uploaded_file = st.file_uploader("📁 Excel Dosyası Yükleyin", type=['xlsx', 'xls'])
+
+if uploaded_file is not None:
+    try:
+        # Excel'i oku
+        df = pd.read_excel(uploaded_file)
         
-        st.markdown("---")
-        st.markdown("""
-        ### 📁 Dosya Formatı
-        - Excel (.xlsx, .xls)
-        - CSV (virgül/boşluk ayrılmış)
+        st.success(f"✅ Dosya başarıyla yüklendi! {len(df)} abone analiz edilecek.")
         
-        **Sütun Yapısı:**
-        - 1. Sütun: Tesisat ID
-        - Diğer Sütunlar: Aylık tüketim değerleri
-        """)
-    
-    # Dosya yükleme
-    uploaded_file = st.file_uploader(
-        "📂 Excel/CSV Dosyanızı Yükleyin",
-        type=['xlsx', 'xls', 'csv', 'txt'],
-        help="Tesisat ID'leri ve aylık tüketim değerlerini içeren dosya"
-    )
-    
-    if uploaded_file is not None:
-        try:
-            # Dedektör oluştur
-            detector = GasFraudDetector(contamination=contamination)
+        # Veri önizleme
+        with st.expander("📊 Veri Önizleme"):
+            st.dataframe(df.head(10))
+        
+        # Kolon kontrolü
+        required_cols = ['Abone_ID']
+        month_cols = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 
+                      'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
+        
+        # Eksik kolonları kontrol et
+        missing_months = [m for m in month_cols if m not in df.columns]
+        if missing_months:
+            st.error(f"❌ Eksik ay kolonları: {', '.join(missing_months)}")
+            st.stop()
+        
+        # Tarife kontrolü (yoksa varsayılan)
+        if 'Tarife' not in df.columns:
+            df['Tarife'] = 'Isınma'
+            st.warning("⚠️ 'Tarife' kolonu bulunamadı, tüm aboneler 'Isınma' olarak varsayıldı.")
+        
+        # Analiz butonu
+        if st.button("🚀 Analizi Başlat", type="primary"):
             
-            # Veriyi yükle
-            with st.spinner("📥 Veri yükleniyor..."):
-                df = detector.load_excel(uploaded_file)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Sonuç dataframe'i
+            results = []
+            
+            for idx, row in df.iterrows():
+                progress_bar.progress((idx + 1) / len(df))
+                status_text.text(f"Analiz ediliyor: {row['Abone_ID']} ({idx+1}/{len(df)})")
                 
-            if df is not None:
-                st.success(f"✅ {len(df)} tesisat yüklendi!")
+                # Aylık tüketim değerlerini al
+                consumption = [row[month] for month in month_cols]
+                consumption = [float(c) if pd.notna(c) else 0 for c in consumption]
                 
-                # Veri önizleme
-                with st.expander("👁️ Veri Önizleme (İlk 10 Satır)"):
-                    st.dataframe(df.head(10))
+                abone_id = row['Abone_ID']
+                tarife = row['Tarife']
                 
-                # Analiz butonu
-                if st.button("🔍 ANOMALİ TESPİTİ BAŞLAT", type="primary"):
-                    
-                    # Özellik çıkarma
-                    with st.spinner("🔧 Özellikler çıkarılıyor..."):
-                        features = detector.extract_features()
-                    
-                    st.success(f"✅ {len(features)} tesisat için özellikler çıkarıldı")
-                    
-                    # Anomali tespiti
-                    with st.spinner("🤖 Makine öğrenmesi modeli çalışıyor..."):
-                        results = detector.detect_anomalies(features)
-                    
-                    # SONUÇLAR
-                    st.markdown("---")
-                    st.header("📊 ANALİZ SONUÇLARI")
-                    
-                    # Özet metrikler
-                    col1, col2, col3, col4 = st.columns(4)
+                # İSTATİSTİKLER
+                winter_months = [consumption[11], consumption[0], consumption[1]]  # Ara, Oca, Şub
+                summer_months = [consumption[5], consumption[6], consumption[7]]  # Haz, Tem, Ağu
+                
+                winter_avg = np.mean(winter_months)
+                summer_avg = np.mean(summer_months)
+                winter_summer_ratio = winter_avg / summer_avg if summer_avg > 0 else 0
+                
+                total_consumption = sum(consumption)
+                mean_consumption = np.mean(consumption)
+                std_dev = np.std(consumption)
+                cv = (std_dev / mean_consumption * 100) if mean_consumption > 0 else 0
+                
+                non_zero = [c for c in consumption if c > 0]
+                max_consumption = max(consumption)
+                min_consumption = min(non_zero) if non_zero else 0
+                volatility = max_consumption / min_consumption if min_consumption > 0 else 0
+                
+                zero_months = sum(1 for c in consumption if c == 0)
+                low_months = sum(1 for c in consumption if 0 < c < 5)
+                
+                # ANİ DÜŞÜŞ SAYISI
+                sudden_drops = 0
+                for i in range(1, len(consumption)):
+                    if consumption[i-1] > 0 and consumption[i] < consumption[i-1] * 0.3:
+                        sudden_drops += 1
+                
+                # SABİT TÜKETİM (son 3 ay)
+                last_3_months = consumption[-3:]
+                last_3_std = np.std(last_3_months)
+                is_flatline = last_3_std < 5 and np.mean(last_3_months) > 0
+                
+                # GERİ DÖNÜŞ PATLAMASI
+                if len(consumption) >= 4:
+                    prev_3_avg = np.mean(consumption[-4:-1])
+                    current_month = consumption[-1]
+                    is_spike = (prev_3_avg < 25) and (current_month > 100)
+                else:
+                    is_spike = False
+                
+                # Z-SKORU
+                z_scores = [(c - mean_consumption) / std_dev if std_dev > 0 else 0 for c in consumption]
+                min_z_score = min(z_scores)
+                
+                # ANOMALI TESPİTİ VE SKORLAMA
+                risk_score = 0
+                anomalies = []
+                
+                # KURAL 1: Kışın Yaz Modu
+                if tarife == 'Isınma' and winter_avg < 30 and summer_avg > 0:
+                    if winter_avg <= summer_avg * 1.2:
+                        risk_score += 20
+                        anomalies.append(f"❄️ Kışın Yaz Modu: Kış ort. {winter_avg:.1f} m³, Yaz ort. {summer_avg:.1f} m³")
+                
+                # KURAL 2: Ani Düşüş
+                if sudden_drops >= 2:
+                    risk_score += 25
+                    anomalies.append(f"📉 Ani Düşüş: {sudden_drops} kez %70+ düşüş tespit edildi")
+                
+                # KURAL 3: Sıfır Tüketim
+                if zero_months > 0 and tarife == 'Isınma':
+                    winter_zero = sum(1 for c in winter_months if c == 0)
+                    if winter_zero > 0:
+                        risk_score += 30
+                        anomalies.append(f"🚫 Sıfır Tüketim: Kış aylarında {winter_zero} ay sıfır")
+                    else:
+                        risk_score += 15
+                        anomalies.append(f"🚫 Sıfır Tüketim: {zero_months} ay sıfır")
+                
+                # KURAL 4: Volatilite (Zikzak)
+                if volatility > 20:
+                    risk_score += 10
+                    anomalies.append(f"📊 Yüksek Volatilite: {volatility:.1f}x (Max/Min oranı)")
+                
+                # KURAL 5: Baz Yük Altı
+                if low_months > 3:
+                    risk_score += 15
+                    anomalies.append(f"⚡ Baz Yük Altı: {low_months} ay <5 m³ tüketim")
+                
+                # KURAL 6: Yaz-Kış Oranı
+                if tarife == 'Isınma' and 0 < winter_summer_ratio < 2.5:
+                    risk_score += 20
+                    anomalies.append(f"🌡️ Düşük Kış/Yaz Oranı: {winter_summer_ratio:.2f} (Normal: 5-10)")
+                
+                # KURAL 7: Sabit Tüketim
+                if is_flatline:
+                    risk_score += 15
+                    anomalies.append(f"📏 Sabit Tüketim: Son 3 ay standart sapma {last_3_std:.1f} m³")
+                
+                # KURAL 9: Geri Dönüş Patlaması
+                if is_spike:
+                    risk_score += 20
+                    anomalies.append(f"💥 Ani Artış: Önceki 3 ay ort. {prev_3_avg:.1f} → Bu ay {current_month:.1f} m³")
+                
+                # KURAL 11: Kış Düşük
+                if tarife == 'Isınma':
+                    winter_low_count = sum(1 for c in winter_months if c < 30)
+                    if winter_low_count == 3:
+                        risk_score += 30
+                        anomalies.append(f"❄️ Kış Ayları Düşük: 3 kış ayının hepsi <30 m³")
+                
+                # KURAL 12: Trend Kırılması (Z-skoru)
+                if min_z_score < -2.5:
+                    risk_score += 20
+                    anomalies.append(f"📈 Trend Kırılması: Minimum Z-skoru {min_z_score:.2f}")
+                
+                # Risk seviyesi
+                if risk_score > 60:
+                    risk_level = "🔴 YÜKSEK RİSK"
+                elif risk_score > 30:
+                    risk_level = "🟡 ORTA RİSK"
+                else:
+                    risk_level = "🟢 DÜŞÜK RİSK"
+                
+                # Sonuçları kaydet
+                results.append({
+                    'Abone_ID': abone_id,
+                    'Tarife': tarife,
+                    'Risk_Skoru': risk_score,
+                    'Risk_Seviyesi': risk_level,
+                    'Kış_Ortalama': round(winter_avg, 2),
+                    'Yaz_Ortalama': round(summer_avg, 2),
+                    'Kış_Yaz_Oranı': round(winter_summer_ratio, 2),
+                    'Toplam_Tüketim': round(total_consumption, 2),
+                    'Ortalama_Tüketim': round(mean_consumption, 2),
+                    'Standart_Sapma': round(std_dev, 2),
+                    'Volatilite': round(volatility, 2),
+                    'Sıfır_Ay_Sayısı': zero_months,
+                    'Düşük_Ay_Sayısı': low_months,
+                    'Ani_Düşüş_Sayısı': sudden_drops,
+                    'Tespit_Edilen_Anomaliler': ' | '.join(anomalies) if anomalies else 'Anomali tespit edilmedi',
+                    'Anomali_Sayısı': len(anomalies)
+                })
+            
+            # DataFrame'e çevir
+            results_df = pd.DataFrame(results)
+            
+            # Sıralama (Risk skoruna göre)
+            results_df = results_df.sort_values('Risk_Skoru', ascending=False).reset_index(drop=True)
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            st.success("✅ Analiz tamamlandı!")
+            
+            # İSTATİSTİKLER
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                high_risk = len(results_df[results_df['Risk_Skoru'] > 60])
+                st.metric("🔴 Yüksek Risk", high_risk, 
+                         delta=f"%{(high_risk/len(results_df)*100):.1f}")
+            
+            with col2:
+                medium_risk = len(results_df[(results_df['Risk_Skoru'] > 30) & (results_df['Risk_Skoru'] <= 60)])
+                st.metric("🟡 Orta Risk", medium_risk,
+                         delta=f"%{(medium_risk/len(results_df)*100):.1f}")
+            
+            with col3:
+                avg_ratio = results_df[results_df['Kış_Yaz_Oranı'] > 0]['Kış_Yaz_Oranı'].mean()
+                st.metric("🌡️ Ort. Kış/Yaz Oranı", f"{avg_ratio:.2f}",
+                         delta="Normal: 5-10")
+            
+            with col4:
+                total_anomalies = results_df['Anomali_Sayısı'].sum()
+                st.metric("⚠️ Toplam Anomali", total_anomalies)
+            
+            st.markdown("---")
+            
+            # Filtreleme seçenekleri
+            st.subheader("🔍 Sonuçları Filtrele")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                risk_filter = st.multiselect(
+                    "Risk Seviyesi",
+                    options=['🔴 YÜKSEK RİSK', '🟡 ORTA RİSK', '🟢 DÜŞÜK RİSK'],
+                    default=['🔴 YÜKSEK RİSK', '🟡 ORTA RİSK']
+                )
+            
+            with col2:
+                min_score = st.slider("Minimum Risk Skoru", 0, 150, 30)
+            
+            with col3:
+                min_anomalies = st.slider("Minimum Anomali Sayısı", 0, 10, 1)
+            
+            # Filtreleme uygula
+            filtered_df = results_df[
+                (results_df['Risk_Seviyesi'].isin(risk_filter)) &
+                (results_df['Risk_Skoru'] >= min_score) &
+                (results_df['Anomali_Sayısı'] >= min_anomalies)
+            ]
+            
+            st.info(f"📊 Gösterilen abone sayısı: {len(filtered_df)} / {len(results_df)}")
+            
+            # Sonuçları göster
+            st.dataframe(
+                filtered_df[['Abone_ID', 'Risk_Skoru', 'Risk_Seviyesi', 
+                            'Kış_Ortalama', 'Yaz_Ortalama', 'Kış_Yaz_Oranı',
+                            'Anomali_Sayısı', 'Tespit_Edilen_Anomaliler']],
+                use_container_width=True,
+                height=400
+            )
+            
+            # EXCEL İNDİRME
+            st.markdown("---")
+            st.subheader("📥 Rapor İndir")
+            
+            # Excel buffer oluştur
+            output = io.BytesIO()
+            
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Ana rapor
+                filtered_df.to_excel(writer, sheet_name='Anomali Raporu', index=False)
+                
+                # Özet istatistikler
+                summary = pd.DataFrame({
+                    'Metrik': [
+                        'Toplam Abone',
+                        'Yüksek Riskli',
+                        'Orta Riskli',
+                        'Düşük Riskli',
+                        'Toplam Anomali',
+                        'Ortalama Risk Skoru',
+                        'Ortalama Kış/Yaz Oranı'
+                    ],
+                    'Değer': [
+                        len(results_df),
+                        high_risk,
+                        medium_risk,
+                        len(results_df) - high_risk - medium_risk,
+                        total_anomalies,
+                        round(results_df['Risk_Skoru'].mean(), 2),
+                        round(avg_ratio, 2)
+                    ]
+                })
+                summary.to_excel(writer, sheet_name='Özet', index=False)
+                
+                # Anomali türleri istatistiği
+                anomaly_types = []
+                for anomalies in results_df['Tespit_Edilen_Anomaliler']:
+                    if anomalies != 'Anomali tespit edilmedi':
+                        anomaly_types.extend([a.split(':')[0].strip() for a in anomalies.split('|')])
+                
+                anomaly_counts = pd.Series(anomaly_types).value_counts().reset_index()
+                anomaly_counts.columns = ['Anomali Türü', 'Tespit Sayısı']
+                anomaly_counts.to_excel(writer, sheet_name='Anomali Türleri', index=False)
+            
+            output.seek(0)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.download_button(
+                    label="📊 Detaylı Rapor İndir (Excel)",
+                    data=output,
+                    file_name=f"dogalgaz_kacak_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            with col2:
+                # CSV olarak da indir
+                csv = filtered_df.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📄 Filtrelenmiş Rapor İndir (CSV)",
+                    data=csv,
+                    file_name=f"dogalgaz_kacak_filtrelenmiş_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            
+            # En riskli 10 abone
+            st.markdown("---")
+            st.subheader("🎯 En Yüksek Riskli 10 Abone")
+            
+            top_10 = results_df.head(10)
+            
+            for idx, row in top_10.iterrows():
+                with st.expander(f"#{idx+1} - Abone: {row['Abone_ID']} | Risk Skoru: {row['Risk_Skoru']} | {row['Risk_Seviyesi']}"):
+                    col1, col2, col3 = st.columns(3)
                     
                     with col1:
-                        st.metric("Toplam Tesisat", len(results))
+                        st.metric("Kış Ortalama", f"{row['Kış_Ortalama']:.1f} m³")
+                        st.metric("Yaz Ortalama", f"{row['Yaz_Ortalama']:.1f} m³")
+                    
                     with col2:
-                        anomaly_count = results['is_anomaly'].sum()
-                        st.metric("Tespit Edilen Anomali", anomaly_count)
+                        st.metric("Kış/Yaz Oranı", f"{row['Kış_Yaz_Oranı']:.2f}")
+                        st.metric("Volatilite", f"{row['Volatilite']:.1f}x")
+                    
                     with col3:
-                        anomaly_rate = (anomaly_count / len(results) * 100)
-                        st.metric("Anomali Oranı", f"{anomaly_rate:.1f}%")
-                    with col4:
-                        high_risk = (results['risk_level'].isin(['Yüksek', 'Çok Yüksek'])).sum()
-                        st.metric("Yüksek Risk", high_risk)
+                        st.metric("Sıfır Ay", row['Sıfır_Ay_Sayısı'])
+                        st.metric("Ani Düşüş", row['Ani_Düşüş_Sayısı'])
                     
-                    # Risk dağılımı
-                    st.subheader("📈 Risk Seviyesi Dağılımı")
-                    risk_dist = results['risk_level'].value_counts()
-                    fig = px.pie(values=risk_dist.values, names=risk_dist.index, 
-                                color_discrete_sequence=['green', 'yellow', 'orange', 'red'])
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # En şüpheli tesisatlar
-                    st.subheader("🚨 EN ŞÜPHELİ TESİSATLAR")
-                    
-                    top_n = st.slider("Gösterilecek tesisat sayısı", 10, 50, 20)
-                    top_suspicious = results.head(top_n)
-                    
-                    # Önemli sütunları seç
-                    display_cols = [
-                        'facility_id', 'risk_score', 'risk_level', 'is_anomaly',
-                        'zero_ratio', 'zero_count', 'consecutive_zero_months',
-                        'low_consumption_ratio', 'sudden_drops', 'max_drop_percentage',
-                        'consecutive_low_months', 'mean_consumption'
-                    ]
-                    
-                    # Yüzdeleri düzenle
-                    display_df = top_suspicious[display_cols].copy()
-                    display_df['zero_ratio'] = (display_df['zero_ratio'] * 100).round(1)
-                    display_df['low_consumption_ratio'] = (display_df['low_consumption_ratio'] * 100).round(1)
-                    display_df['max_drop_percentage'] = display_df['max_drop_percentage'].round(1)
-                    display_df['mean_consumption'] = display_df['mean_consumption'].round(2)
-                    display_df['risk_score'] = display_df['risk_score'].round(2)
-                    
-                    # Sütun isimlerini Türkçeleştir
-                    display_df.columns = [
-                        'Tesisat ID', 'Risk Skoru', 'Risk Seviyesi', 'Anomali',
-                        'Sıfır Tük. %', 'Sıfır Ay', 'Ardışık Sıfır',
-                        'Düşük Tük. %', 'Ani Düşüş', 'Maks Düşüş %',
-                        'Ardışık Düşük Ay', 'Ort. Tüketim'
-                    ]
-                    
-                    # Renkli tablo
-                    st.dataframe(
-                        display_df.style.background_gradient(subset=['Risk Skoru'], cmap='Reds'),
-                        use_container_width=True,
-                        height=600
-                    )
-                    
-                    # Risk skoru dağılımı
-                    st.subheader("📊 Risk Skoru Dağılımı")
-                    fig2 = px.histogram(results, x='risk_score', nbins=50,
-                                       labels={'risk_score': 'Risk Skoru', 'count': 'Tesisat Sayısı'})
-                    st.plotly_chart(fig2, use_container_width=True)
-                    
-                    # Excel indirme butonları
-                    st.markdown("---")
-                    st.subheader("💾 Sonuçları İndir")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Tüm sonuçlar
-                        excel_all = create_excel_download(results)
-                        st.download_button(
-                            label="📥 Tüm Sonuçları İndir (Excel)",
-                            data=excel_all,
-                            file_name="tum_anomali_sonuclari.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    
-                    with col2:
-                        # Sadece şüpheliler
-                        suspicious_only = results[results['risk_level'].isin(['Yüksek', 'Çok Yüksek'])]
-                        excel_suspicious = create_excel_download(suspicious_only)
-                        st.download_button(
-                            label="📥 Sadece Şüpheli Tesisatlar (Excel)",
-                            data=excel_suspicious,
-                            file_name="supheli_tesisatlar.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    
-                    # Detaylı açıklama
-                    with st.expander("ℹ️ Risk Skoru Nasıl Hesaplanıyor?"):
-                        st.markdown("""
-                        **Risk Skoru Formülü:**
-                        
-                        - **Sıfır Tüketim Oranı** × 100 (en önemli faktör)
-                        - **Ardışık Sıfır Aylar** × 20
-                        - **Düşük Tüketim Oranı** × 50
-                        - **Ardışık Düşük Aylar** × 10
-                        - **Ani Düşüş Sayısı** × 15
-                        - **Maksimum Düşüş Yüzdesi** ÷ 10
-                        - **Negatif Trend Dönemleri** × 12
-                        - **Mevsimsel Anormallik** × 8
-                        - **Değişkenlik Katsayısı** × 5
-                        
-                        **Risk Seviyeleri:**
-                        - 🟢 Düşük: 0-20
-                        - 🟡 Orta: 20-50
-                        - 🟠 Yüksek: 50-100
-                        - 🔴 Çok Yüksek: 100+
-                        """)
-                        
-        except Exception as e:
-            st.error(f"❌ Hata oluştu: {str(e)}")
-            st.info("Lütfen dosya formatını kontrol edin. İlk sütun Tesisat ID, diğer sütunlar aylık tüketim değerleri olmalı.")
+                    st.markdown("**🔍 Tespit Edilen Anomaliler:**")
+                    anomalies_list = row['Tespit_Edilen_Anomaliler'].split('|')
+                    for anomaly in anomalies_list:
+                        st.markdown(f"- {anomaly.strip()}")
+    
+    except Exception as e:
+        st.error(f"❌ Hata oluştu: {str(e)}")
+        st.exception(e)
 
+else:
+    # Örnek format göster
+    st.info("👆 Lütfen yukarıdan bir Excel dosyası yükleyin")
+    
+    st.subheader("📋 Excel Dosya Formatı Örneği")
+    
+    example_df = pd.DataFrame({
+        'Abone_ID': [10004494, 10011908, 10025351],
+        'Tarife': ['Isınma', 'Isınma', 'Mutfak'],
+        'Ocak': [165.80, 209.90, 4.63],
+        'Şubat': [166.64, 168.49, 18.59],
+        'Mart': [186.68, 286.03, 19.11],
+        'Nisan': [72.18, 63.47, 15.29],
+        'Mayıs': [55.69, 54.09, 18.73],
+        'Haziran': [35.35, 22.29, 18.95],
+        'Temmuz': [19.16, 9.09, 77.30],
+        'Ağustos': [20.69, 1.79, 141.76],
+        'Eylül': [24.07, 1.78, 145.52],
+        'Ekim': [18.89, 20.82, 152.78],
+        'Kasım': [293.68, 61.88, 144.13],
+        'Aralık': [28.26, 76.77, 110.17]
+    })
+    
+    st.dataframe(example_df)
+    
+    # Örnek dosya indir
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        example_df.to_excel(writer, index=False, sheet_name='Veri')
+    buffer.seek(0)
+    
+    st.download_button(
+        label="📥 Örnek Excel Şablonu İndir",
+        data=buffer,
+        file_name="dogalgaz_sablonu.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-if __name__ == "__main__":
-    main()
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: gray;'>
+    <p>🔥 Doğalgaz Kaçak Tespit Sistemi v1.0 | 12 Kural ile Anomali Tespiti</p>
+</div>
+""", unsafe_allow_html=True)
