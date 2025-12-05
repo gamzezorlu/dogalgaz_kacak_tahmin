@@ -19,11 +19,11 @@ with st.sidebar:
     - **2021/01, 2021/02...**: Aylık tüketim (m³)
     
     ### 15 Gelişmiş Tespit Kuralı:
-    1. 🚫 **Uzun Süreli Sıfır**: 3+ ay sıfır tüketim
-    2. 💥 **Ani Patlama**: Sıfırdan yüksek tüketime geçiş
-    3. 📉 **Dramatik Düşüş**: %90+ azalma
-    4. ❄️ **Kış Anomalisi**: Kışın çok düşük/sıfır tüketim
-    5. 🔄 **On-Off Pattern**: Aşırı dalgalanma (sıfır↔yüksek)
+    1. 🚫 **Uzun Süreli Sıfır**: 6+ ay sıfır (DÜŞÜK ÖNCELİK)
+    2. 💥 **Ani Patlama**: Sıfırdan yüksek tüketime geçiş (YÜKSEK ÖNCELİK)
+    3. 📉 **Dramatik Düşüş**: %90+ azalma (YÜKSEK ÖNCELİK)
+    4. ❄️ **Kış Anomalisi**: Kışın çok düşük tüketim (YÜKSEK ÖNCELİK)
+    5. 🔄 **On-Off Pattern**: Aşırı dalgalanma (YÜKSEK ÖNCELİK)
     6. 📍 **Tek Ay İstisna**: Bir ay çok yüksek, diğerleri düşük
     7. 🎯 **Kaçak Sonrası Patlama**: Düşük periyot + ani yükselme
     8. 📊 **Aşırı Volatilite**: CV >150%
@@ -31,9 +31,12 @@ with st.sidebar:
     10. ⚡ **Mikro Tüketim**: Sürekli <5 m³
     11. 🔥 **Hayalet Tüketim**: Aralıklı çok düşük değerler
     12. 📈 **Trend Kırılması**: Z-score <-3
-    13. 💤 **Uzun Süre Sessizlik**: 6+ ay sıfır
+    13. 💤 **Uzun Süre Sessizlik**: 12+ ay sıfır (DÜŞÜK ÖNCELİK)
     14. 🎲 **Kaotik Desen**: Tahmin edilemez pattern
-    15. 🔍 **Komşu Sapması**: Bölge ortalamasından %70+ düşük
+    15. 🔍 **Anormal Düşük Toplam**: Genel tüketim çok düşük
+    
+    **Not:** Uzun süre sıfır olanlar düşük öncelikli kabul edilir.
+    Kaçak tespitinde aktif kullanım sırasındaki anomaliler önemlidir.
     """)
     
     st.markdown("---")
@@ -147,141 +150,148 @@ if uploaded_file is not None:
                 zero_months = sum(1 for c in consumption if c == 0)
                 very_low_months = sum(1 for c in consumption if 0 < c < 5)
                 
-                # PATTERN ANALİZİ
+                # PATTERN ANALİZİ - SADECE AKTİF TÜKETİM DÖNEMLERİ
                 risk_score = 0
                 anomalies = []
                 
-                # KURAL 1: Uzun Süreli Sıfır Tüketim (3+ ay)
-                consecutive_zeros = 0
-                max_consecutive_zeros = 0
-                for c in consumption:
-                    if c == 0:
-                        consecutive_zeros += 1
-                        max_consecutive_zeros = max(max_consecutive_zeros, consecutive_zeros)
-                    else:
-                        consecutive_zeros = 0
+                # Sıfır olmayan ayları filtrele
+                active_consumption = [c for c in consumption if c > 0]
+                active_indices = [i for i, c in enumerate(consumption) if c > 0]
                 
-                if max_consecutive_zeros >= 3:
-                    risk_score += 35
-                    anomalies.append(f"🚫 Uzun Süreli Sıfır: {max_consecutive_zeros} ay ardışık sıfır tüketim")
+                # Eğer hiç aktif tüketim yoksa analiz yapma
+                if len(active_consumption) < 3:
+                    anomalies.append("ℹ️ Yeterli aktif tüketim verisi yok (3 aydan az)")
+                    risk_score = 0
+                    
+                    results.append({
+                        'Tesisat_No': abone_id,
+                        'Bina_No': bina_no if bina_no else '-',
+                        'Risk_Skoru': 0,
+                        'Risk_Seviyesi': '⚪ ANALİZ DIŞI',
+                        'Toplam_Tüketim': round(total_consumption, 2),
+                        'Ortalama_Tüketim': 0,
+                        'Standart_Sapma': 0,
+                        'CV_%': 0,
+                        'Sıfır_Ay': zero_months,
+                        'Çok_Düşük_Ay': 0,
+                        'Max_Ardışık_Sıfır': 0,
+                        'Max_Tüketim': 0,
+                        'Min_Tüketim': 0,
+                        'Anomali_Sayısı': 0,
+                        'Tespit_Edilen_Anomaliler': 'Yeterli aktif tüketim yok'
+                    })
+                    continue
                 
-                # KURAL 2: Ani Patlama (Sıfırdan yüksek tüketime geçiş)
-                for i in range(1, len(consumption)):
-                    if consumption[i-1] == 0 and consumption[i] > 100:
-                        risk_score += 30
-                        anomalies.append(f"💥 Ani Patlama: {month_cols[i-1]} (0 m³) → {month_cols[i]} ({consumption[i]:.1f} m³)")
+                # Aktif dönem istatistikleri
+                active_mean = np.mean(active_consumption)
+                active_std = np.std(active_consumption)
+                active_cv = (active_std / active_mean * 100) if active_mean > 0 else 0
+                active_max = max(active_consumption)
+                active_min = min(active_consumption)
+                
+                # KURAL 1: Dramatik Düşüş (%90+) - SADECE AKTİF DÖNEMLER ARASI
+                for i in range(1, len(active_consumption)):
+                    if active_consumption[i-1] > 50 and active_consumption[i] < active_consumption[i-1] * 0.1:
+                        risk_score += 35
+                        anomalies.append(f"📉 Dramatik Düşüş: {active_consumption[i-1]:.1f} → {active_consumption[i]:.1f} m³ (%{((1-active_consumption[i]/active_consumption[i-1])*100):.0f})")
                         break
                 
-                # KURAL 3: Dramatik Düşüş (%90+)
-                for i in range(1, len(consumption)):
-                    if consumption[i-1] > 50 and consumption[i] < consumption[i-1] * 0.1:
-                        risk_score += 25
-                        anomalies.append(f"📉 Dramatik Düşüş: {consumption[i-1]:.1f} → {consumption[i]:.1f} m³ (%{((1-consumption[i]/consumption[i-1])*100):.0f})")
-                        break
+                # KURAL 2: Kış Anomalisi - SADECE AKTİF KIŞ AYLARINDAKİ DÜŞÜK TÜKETİM
+                winter_active = []
+                summer_active = []
                 
-                # KURAL 4: Kış Anomalisi (Aralık, Ocak, Şubat düşük/sıfır)
-                winter_indices = []
-                for i, month in enumerate(month_cols):
+                for i in active_indices:
+                    month = month_cols[i]
                     if '/12' in month or '/01' in month or '/02' in month or \
                        month in ['Aralık', 'Ocak', 'Şubat']:
-                        winter_indices.append(i)
+                        winter_active.append(consumption[i])
+                    elif '/06' in month or '/07' in month or '/08' in month or \
+                         month in ['Haziran', 'Temmuz', 'Ağustos']:
+                        summer_active.append(consumption[i])
                 
-                if winter_indices:
-                    winter_values = [consumption[i] for i in winter_indices if i < len(consumption)]
-                    winter_avg = np.mean(winter_values) if winter_values else 0
-                    winter_zeros = sum(1 for v in winter_values if v == 0)
-                    
-                    if winter_avg < 20:
+                if len(winter_active) >= 2:
+                    winter_avg = np.mean(winter_active)
+                    if winter_avg < 30:
+                        risk_score += 40
+                        anomalies.append(f"❄️ Kış Anomalisi: Aktif kış ayları ortalaması {winter_avg:.1f} m³ (Isınma beklentisinin altında)")
+                
+                # KURAL 3: Ters Sezonluk - Yazın kıştan fazla tüketim
+                if len(winter_active) >= 2 and len(summer_active) >= 2:
+                    summer_avg = np.mean(summer_active)
+                    winter_avg = np.mean(winter_active)
+                    if summer_avg > winter_avg * 1.2:
                         risk_score += 30
-                        anomalies.append(f"❄️ Kış Anomalisi: Kış ayları ortalaması {winter_avg:.1f} m³ ({winter_zeros} ay sıfır)")
-                
-                # KURAL 5: On-Off Pattern (Aşırı dalgalanma)
-                transitions = 0
-                for i in range(1, len(consumption)):
-                    if (consumption[i-1] < 5 and consumption[i] > 50) or \
-                       (consumption[i-1] > 50 and consumption[i] < 5):
-                        transitions += 1
-                
-                if transitions >= 4:
-                    risk_score += 25
-                    anomalies.append(f"🔄 On-Off Pattern: {transitions} kez düşük↔yüksek geçiş")
-                
-                # KURAL 6: Tek Ay İstisna (Bir ay çok yüksek, diğerleri düşük)
-                if max_consumption > 100:
-                    other_months = [c for c in consumption if c != max_consumption]
-                    if other_months and np.mean(other_months) < 30:
-                        risk_score += 20
-                        max_month_idx = consumption.index(max_consumption)
-                        anomalies.append(f"📍 Tek Ay İstisna: {month_cols[max_month_idx]} ({max_consumption:.1f} m³), diğerleri ort. {np.mean(other_months):.1f} m³")
-                
-                # KURAL 7: Kaçak Sonrası Patlama
-                for i in range(6, len(consumption)):
-                    last_6_avg = np.mean(consumption[i-6:i])
-                    if last_6_avg < 30 and consumption[i] > 150:
-                        risk_score += 35
-                        anomalies.append(f"🎯 Kaçak Sonrası Patlama: 6 ay ort. {last_6_avg:.1f} → {consumption[i]:.1f} m³")
-                        break
-                
-                # KURAL 8: Aşırı Volatilite
-                if cv > 150:
-                    risk_score += 20
-                    anomalies.append(f"📊 Aşırı Volatilite: CV = {cv:.1f}%")
-                
-                # KURAL 9: Ters Sezonluk (Yazın kıştan fazla)
-                summer_indices = []
-                for i, month in enumerate(month_cols):
-                    if '/06' in month or '/07' in month or '/08' in month or \
-                       month in ['Haziran', 'Temmuz', 'Ağustos']:
-                        summer_indices.append(i)
-                
-                if summer_indices and winter_indices:
-                    summer_values = [consumption[i] for i in summer_indices if i < len(consumption)]
-                    summer_avg = np.mean(summer_values) if summer_values else 0
-                    
-                    if summer_avg > winter_avg and winter_avg > 0:
-                        risk_score += 25
                         anomalies.append(f"🌡️ Ters Sezonluk: Yaz ort. {summer_avg:.1f} > Kış ort. {winter_avg:.1f} m³")
                 
-                # KURAL 10: Mikro Tüketim (Sürekli <5 m³)
-                if very_low_months > len(consumption) * 0.5 and zero_months < len(consumption) * 0.3:
-                    risk_score += 15
-                    anomalies.append(f"⚡ Mikro Tüketim: {very_low_months} ay <5 m³")
+                # KURAL 4: On-Off Pattern - SADECE AKTİF AYLAR ARASI
+                transitions = 0
+                for i in range(1, len(active_consumption)):
+                    if (active_consumption[i-1] < 20 and active_consumption[i] > 100) or \
+                       (active_consumption[i-1] > 100 and active_consumption[i] < 20):
+                        transitions += 1
                 
-                # KURAL 11: Hayalet Tüketim (Aralıklı çok düşük)
-                sporadic_low = sum(1 for c in consumption if 0.5 < c < 3)
-                if sporadic_low >= 6:
-                    risk_score += 20
-                    anomalies.append(f"🔥 Hayalet Tüketim: {sporadic_low} ay 0.5-3 m³ arası")
+                if transitions >= 3:
+                    risk_score += 30
+                    anomalies.append(f"🔄 On-Off Pattern: {transitions} kez aşırı dalgalanma (aktif dönemde)")
                 
-                # KURAL 12: Trend Kırılması
-                z_scores = [(c - mean_consumption) / std_dev if std_dev > 0 else 0 for c in consumption]
-                min_z = min(z_scores) if z_scores else 0
-                if min_z < -3:
+                # KURAL 5: Tek Ay İstisna
+                if active_max > 150 and len(active_consumption) > 3:
+                    other_active = [c for c in active_consumption if c != active_max]
+                    if other_active and np.mean(other_active) < 50:
+                        risk_score += 25
+                        anomalies.append(f"📍 Tek Ay İstisna: Max {active_max:.1f} m³, diğer aktif aylar ort. {np.mean(other_active):.1f} m³")
+                
+                # KURAL 6: Kaçak Sonrası Patlama
+                if len(active_consumption) >= 4:
+                    for i in range(3, len(active_consumption)):
+                        prev_avg = np.mean(active_consumption[i-3:i])
+                        if prev_avg < 40 and active_consumption[i] > 200:
+                            risk_score += 40
+                            anomalies.append(f"🎯 Kaçak Sonrası Patlama: Önceki 3 aktif ay ort. {prev_avg:.1f} → {active_consumption[i]:.1f} m³")
+                            break
+                
+                # KURAL 7: Aşırı Volatilite
+                if active_cv > 150:
                     risk_score += 25
-                    anomalies.append(f"📈 Trend Kırılması: Min Z-score = {min_z:.2f}")
+                    anomalies.append(f"📊 Aşırı Volatilite: CV = {active_cv:.1f}% (aktif dönemde)")
                 
-                # KURAL 13: Uzun Süre Sessizlik (6+ ay sıfır)
-                if max_consecutive_zeros >= 6:
-                    risk_score += 40
-                    anomalies.append(f"💤 Uzun Süre Sessizlik: {max_consecutive_zeros} ay sıfır")
-                
-                # KURAL 14: Kaotik Desen
-                direction_changes = 0
-                for i in range(2, len(consumption)):
-                    trend1 = consumption[i-1] - consumption[i-2]
-                    trend2 = consumption[i] - consumption[i-1]
-                    if (trend1 > 0 and trend2 < 0) or (trend1 < 0 and trend2 > 0):
-                        direction_changes += 1
-                
-                if direction_changes > len(consumption) * 0.6:
-                    risk_score += 15
-                    anomalies.append(f"🎲 Kaotik Desen: {direction_changes} yön değişimi")
-                
-                # KURAL 15: Toplam tüketim çok düşük
-                expected_min = len(consumption) * 10  # Aylık minimum 10 m³ beklentisi
-                if total_consumption < expected_min and zero_months < len(consumption) * 0.5:
+                # KURAL 8: Mikro Tüketim - Çoğu aktif ay <5 m³
+                micro_months = sum(1 for c in active_consumption if c < 5)
+                if micro_months > len(active_consumption) * 0.5:
                     risk_score += 20
-                    anomalies.append(f"⚠️ Anormal Düşük Toplam: {total_consumption:.1f} m³ ({len(consumption)} ay)")
+                    anomalies.append(f"⚡ Mikro Tüketim: {micro_months}/{len(active_consumption)} aktif ay <5 m³")
+                
+                # KURAL 9: Hayalet Tüketim
+                ghost_months = sum(1 for c in active_consumption if 0.5 < c < 3)
+                if ghost_months >= 4:
+                    risk_score += 25
+                    anomalies.append(f"🔥 Hayalet Tüketim: {ghost_months} aktif ay 0.5-3 m³ arası")
+                
+                # KURAL 10: Trend Kırılması - Aktif dönemde
+                z_scores = [(c - active_mean) / active_std if active_std > 0 else 0 for c in active_consumption]
+                min_z = min(z_scores) if z_scores else 0
+                if min_z < -2.5:
+                    risk_score += 25
+                    anomalies.append(f"📈 Trend Kırılması: Min Z-score = {min_z:.2f} (aktif dönemde)")
+                
+                # KURAL 11: Kaotik Desen - Aktif dönemde
+                if len(active_consumption) >= 3:
+                    direction_changes = 0
+                    for i in range(2, len(active_consumption)):
+                        trend1 = active_consumption[i-1] - active_consumption[i-2]
+                        trend2 = active_consumption[i] - active_consumption[i-1]
+                        if abs(trend1) > 10 and abs(trend2) > 10:  # Anlamlı değişimler
+                            if (trend1 > 0 and trend2 < 0) or (trend1 < 0 and trend2 > 0):
+                                direction_changes += 1
+                    
+                    if direction_changes > len(active_consumption) * 0.5:
+                        risk_score += 20
+                        anomalies.append(f"🎲 Kaotik Desen: {direction_changes} yön değişimi (aktif dönemde)")
+                
+                # KURAL 12: Anormal Düşük Ortalama - Aktif dönemde
+                if active_mean < 15 and len(active_consumption) >= 6:
+                    risk_score += 30
+                    anomalies.append(f"⚠️ Anormal Düşük Ortalama: {active_mean:.1f} m³/ay (aktif dönemde)")
                 
                 # Risk seviyesi
                 if risk_score > 80:
