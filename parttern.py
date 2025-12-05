@@ -59,30 +59,45 @@ if uploaded_file is not None:
         month_cols_original = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 
                       'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
         
+        # Ay numaralarını tanımla (tarih formatı için)
+        month_numbers = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+        
         # Alternatif ay isimleri
         month_variations = {
-            'Ocak': ['ocak', 'OCAK', 'Ocak', 'January', 'JAN'],
-            'Şubat': ['şubat', 'ŞUBAT', 'Şubat', 'Subat', 'February', 'FEB'],
-            'Mart': ['mart', 'MART', 'Mart', 'March', 'MAR'],
-            'Nisan': ['nisan', 'NİSAN', 'NISAN', 'Nisan', 'April', 'APR'],
-            'Mayıs': ['mayıs', 'MAYIS', 'Mayıs', 'Mayis', 'May', 'MAY'],
-            'Haziran': ['haziran', 'HAZİRAN', 'HAZIRAN', 'Haziran', 'June', 'JUN'],
-            'Temmuz': ['temmuz', 'TEMMUZ', 'Temmuz', 'July', 'JUL'],
-            'Ağustos': ['ağustos', 'AĞUSTOS', 'Ağustos', 'Agustos', 'August', 'AUG'],
-            'Eylül': ['eylül', 'EYLÜL', 'Eylül', 'Eylul', 'September', 'SEP'],
-            'Ekim': ['ekim', 'EKİM', 'EKIM', 'Ekim', 'October', 'OCT'],
-            'Kasım': ['kasım', 'KASIM', 'Kasım', 'Kasim', 'November', 'NOV'],
-            'Aralık': ['aralık', 'ARALIK', 'Aralık', 'Aralik', 'December', 'DEC']
+            'Ocak': ['ocak', 'OCAK', 'Ocak', 'January', 'JAN', '01'],
+            'Şubat': ['şubat', 'ŞUBAT', 'Şubat', 'Subat', 'February', 'FEB', '02'],
+            'Mart': ['mart', 'MART', 'Mart', 'March', 'MAR', '03'],
+            'Nisan': ['nisan', 'NİSAN', 'NISAN', 'Nisan', 'April', 'APR', '04'],
+            'Mayıs': ['mayıs', 'MAYIS', 'Mayıs', 'Mayis', 'May', 'MAY', '05'],
+            'Haziran': ['haziran', 'HAZİRAN', 'HAZIRAN', 'Haziran', 'June', 'JUN', '06'],
+            'Temmuz': ['temmuz', 'TEMMUZ', 'Temmuz', 'July', 'JUL', '07'],
+            'Ağustos': ['ağustos', 'AĞUSTOS', 'Ağustos', 'Agustos', 'August', 'AUG', '08'],
+            'Eylül': ['eylül', 'EYLÜL', 'Eylül', 'Eylul', 'September', 'SEP', '09'],
+            'Ekim': ['ekim', 'EKİM', 'EKIM', 'Ekim', 'October', 'OCT', '10'],
+            'Kasım': ['kasım', 'KASIM', 'Kasım', 'Kasim', 'November', 'NOV', '11'],
+            'Aralık': ['aralık', 'ARALIK', 'Aralık', 'Aralik', 'December', 'DEC', '12']
         }
         
         # Excel'deki kolonları eşleştir
         month_cols = []
         missing_months = []
         
-        for standard_month in month_cols_original:
+        for idx, standard_month in enumerate(month_cols_original):
             found = False
+            month_num = month_numbers[idx]
+            
             for col in df.columns:
+                col_str = str(col)
+                # Kolon adını kontrol et
                 if col == standard_month or col in month_variations.get(standard_month, []):
+                    month_cols.append(col)
+                    found = True
+                    break
+                # Tarih formatını kontrol et (örn: "2018/01", "2018-01", "01")
+                elif (f'/{month_num}' in col_str or 
+                      f'-{month_num}' in col_str or 
+                      col_str.endswith(month_num) or
+                      col_str == month_num):
                     month_cols.append(col)
                     found = True
                     break
@@ -93,8 +108,9 @@ if uploaded_file is not None:
         # Eksik kolonları kontrol et
         if missing_months:
             st.error(f"❌ Eksik ay kolonları: {', '.join(missing_months)}")
-            st.info("💡 Excel dosyanızda şu kolon isimlerinin bulunduğundan emin olun:")
+            st.info("💡 Excel dosyanızda bulunan kolonlar:")
             st.write(df.columns.tolist())
+            st.warning("📌 Beklenen format: 'Ocak', 'Şubat', ... veya '2018/01', '2018/02', ... veya '01', '02', ...")
             st.stop()
         
         # Tarife kontrolü (yoksa varsayılan)
