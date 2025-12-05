@@ -122,9 +122,9 @@ if uploaded_file is not None:
                 # Tüketim değerlerini al
                 consumption = []
                 for month in month_cols:
-                    val = row[month]
+                    val = row.get(month, 0)
                     if pd.isna(val):
-                        consumption.append(0)
+                        consumption.append(0.0)
                     else:
                         try:
                             # Virgüllü sayıları düzelt
@@ -132,15 +132,15 @@ if uploaded_file is not None:
                                 val = val.replace(',', '.')
                             consumption.append(float(val))
                         except:
-                            consumption.append(0)
+                            consumption.append(0.0)
                 
                 abone_id = row[abone_col]
-                bina_no = row[bina_col] if bina_col else None
+                bina_no = row[bina_col] if bina_col and (bina_col in row.index) else None
                 
                 # İSTATİSTİKLER
                 total_consumption = sum(consumption)
-                mean_consumption = np.mean(consumption)
-                std_dev = np.std(consumption)
+                mean_consumption = np.mean(consumption) if consumption else 0
+                std_dev = np.std(consumption) if consumption else 0
                 cv = (std_dev / mean_consumption * 100) if mean_consumption > 0 else 0
                 
                 non_zero = [c for c in consumption if c > 0]
@@ -149,6 +149,23 @@ if uploaded_file is not None:
                 
                 zero_months = sum(1 for c in consumption if c == 0)
                 very_low_months = sum(1 for c in consumption if 0 < c < 5)
+                
+                # --- HATA DÜZELTME: Maksimum ardışık sıfır sayısı ---
+                max_consecutive_zeros = 0
+                _current_zeros = 0
+                for c in consumption:
+                    try:
+                        is_zero = (float(c) == 0.0)
+                    except:
+                        is_zero = False
+
+                    if is_zero:
+                        _current_zeros += 1
+                        if _current_zeros > max_consecutive_zeros:
+                            max_consecutive_zeros = _current_zeros
+                    else:
+                        _current_zeros = 0
+                # --- DÜZELTME SONU ---
                 
                 # PATTERN ANALİZİ - SADECE AKTİF TÜKETİM DÖNEMLERİ
                 risk_score = 0
@@ -174,7 +191,7 @@ if uploaded_file is not None:
                         'CV_%': 0,
                         'Sıfır_Ay': zero_months,
                         'Çok_Düşük_Ay': 0,
-                        'Max_Ardışık_Sıfır': 0,
+                        'Max_Ardışık_Sıfır': max_consecutive_zeros,
                         'Max_Tüketim': 0,
                         'Min_Tüketim': 0,
                         'Anomali_Sayısı': 0,
@@ -201,7 +218,7 @@ if uploaded_file is not None:
                 summer_active = []
                 
                 for i in active_indices:
-                    month = month_cols[i]
+                    month = str(month_cols[i])
                     if '/12' in month or '/01' in month or '/02' in month or \
                        month in ['Aralık', 'Ocak', 'Şubat']:
                         winter_active.append(consumption[i])
@@ -399,8 +416,8 @@ if uploaded_file is not None:
                     'Metrik': ['Toplam Abone', 'Çok Yüksek Şüpheli', 'Yüksek Şüpheli',
                               'Orta Şüpheli', 'Düşük Risk', 'Toplam Anomali'],
                     'Değer': [len(results_df), very_high, high_risk, medium_risk,
-                             len(results_df) - very_high - high_risk - medium_risk,
-                             total_anomalies]
+                              len(results_df) - very_high - high_risk - medium_risk,
+                              total_anomalies]
                 })
                 summary.to_excel(writer, sheet_name='Özet', index=False)
             
@@ -436,7 +453,7 @@ if uploaded_file is not None:
                         st.metric("Anomali Sayısı", row['Anomali_Sayısı'])
                     
                     st.markdown("**🔍 Tespit Edilen Anomaliler:**")
-                    for anomaly in row['Tespit_Edilen_Anomaliler'].split('|'):
+                    for anomaly in str(row['Tespit_Edilen_Anomaliler']).split('|'):
                         st.markdown(f"- {anomaly.strip()}")
     
     except Exception as e:
