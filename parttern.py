@@ -45,21 +45,56 @@ if uploaded_file is not None:
         # Excel'i oku
         df = pd.read_excel(uploaded_file)
         
+        # Kolon isimlerini normalize et (boşlukları temizle, küçük harfe çevir)
+        df.columns = df.columns.str.strip()
+        
         st.success(f"✅ Dosya başarıyla yüklendi! {len(df)} abone analiz edilecek.")
         
         # Veri önizleme
         with st.expander("📊 Veri Önizleme"):
             st.dataframe(df.head(10))
         
-        # Kolon kontrolü
+        # Kolon kontrolü - Flexible ay isimleri
         required_cols = ['Abone_ID']
-        month_cols = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 
+        month_cols_original = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 
                       'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
         
+        # Alternatif ay isimleri
+        month_variations = {
+            'Ocak': ['ocak', 'OCAK', 'Ocak', 'January', 'JAN'],
+            'Şubat': ['şubat', 'ŞUBAT', 'Şubat', 'Subat', 'February', 'FEB'],
+            'Mart': ['mart', 'MART', 'Mart', 'March', 'MAR'],
+            'Nisan': ['nisan', 'NİSAN', 'NISAN', 'Nisan', 'April', 'APR'],
+            'Mayıs': ['mayıs', 'MAYIS', 'Mayıs', 'Mayis', 'May', 'MAY'],
+            'Haziran': ['haziran', 'HAZİRAN', 'HAZIRAN', 'Haziran', 'June', 'JUN'],
+            'Temmuz': ['temmuz', 'TEMMUZ', 'Temmuz', 'July', 'JUL'],
+            'Ağustos': ['ağustos', 'AĞUSTOS', 'Ağustos', 'Agustos', 'August', 'AUG'],
+            'Eylül': ['eylül', 'EYLÜL', 'Eylül', 'Eylul', 'September', 'SEP'],
+            'Ekim': ['ekim', 'EKİM', 'EKIM', 'Ekim', 'October', 'OCT'],
+            'Kasım': ['kasım', 'KASIM', 'Kasım', 'Kasim', 'November', 'NOV'],
+            'Aralık': ['aralık', 'ARALIK', 'Aralık', 'Aralik', 'December', 'DEC']
+        }
+        
+        # Excel'deki kolonları eşleştir
+        month_cols = []
+        missing_months = []
+        
+        for standard_month in month_cols_original:
+            found = False
+            for col in df.columns:
+                if col == standard_month or col in month_variations.get(standard_month, []):
+                    month_cols.append(col)
+                    found = True
+                    break
+            
+            if not found:
+                missing_months.append(standard_month)
+        
         # Eksik kolonları kontrol et
-        missing_months = [m for m in month_cols if m not in df.columns]
         if missing_months:
             st.error(f"❌ Eksik ay kolonları: {', '.join(missing_months)}")
+            st.info("💡 Excel dosyanızda şu kolon isimlerinin bulunduğundan emin olun:")
+            st.write(df.columns.tolist())
             st.stop()
         
         # Tarife kontrolü (yoksa varsayılan)
@@ -81,11 +116,19 @@ if uploaded_file is not None:
                 status_text.text(f"Analiz ediliyor: {row['Abone_ID']} ({idx+1}/{len(df)})")
                 
                 # Aylık tüketim değerlerini al
-                consumption = [row[month] for month in month_cols]
-                consumption = [float(c) if pd.notna(c) else 0 for c in consumption]
+                consumption = []
+                for month in month_cols:
+                    val = row[month]
+                    if pd.isna(val):
+                        consumption.append(0)
+                    else:
+                        try:
+                            consumption.append(float(val))
+                        except:
+                            consumption.append(0)
                 
                 abone_id = row['Abone_ID']
-                tarife = row['Tarife']
+                tarife = row.get('Tarife', 'Isınma')
                 
                 # İSTATİSTİKLER
                 winter_months = [consumption[11], consumption[0], consumption[1]]  # Ara, Oca, Şub
@@ -101,7 +144,7 @@ if uploaded_file is not None:
                 cv = (std_dev / mean_consumption * 100) if mean_consumption > 0 else 0
                 
                 non_zero = [c for c in consumption if c > 0]
-                max_consumption = max(consumption)
+                max_consumption = max(consumption) if consumption else 0
                 min_consumption = min(non_zero) if non_zero else 0
                 volatility = max_consumption / min_consumption if min_consumption > 0 else 0
                 
@@ -116,7 +159,7 @@ if uploaded_file is not None:
                 
                 # SABİT TÜKETİM (son 3 ay)
                 last_3_months = consumption[-3:]
-                last_3_std = np.std(last_3_months)
+                last_3_std = np.std(last_3_months) if last_3_months else 0
                 is_flatline = last_3_std < 5 and np.mean(last_3_months) > 0
                 
                 # GERİ DÖNÜŞ PATLAMASI
@@ -129,7 +172,7 @@ if uploaded_file is not None:
                 
                 # Z-SKORU
                 z_scores = [(c - mean_consumption) / std_dev if std_dev > 0 else 0 for c in consumption]
-                min_z_score = min(z_scores)
+                min_z_score = min(z_scores) if z_scores else 0
                 
                 # ANOMALI TESPİTİ VE SKORLAMA
                 risk_score = 0
@@ -246,7 +289,8 @@ if uploaded_file is not None:
                          delta=f"%{(medium_risk/len(results_df)*100):.1f}")
             
             with col3:
-                avg_ratio = results_df[results_df['Kış_Yaz_Oranı'] > 0]['Kış_Yaz_Oranı'].mean()
+                avg_ratio_df = results_df[results_df['Kış_Yaz_Oranı'] > 0]
+                avg_ratio = avg_ratio_df['Kış_Yaz_Oranı'].mean() if len(avg_ratio_df) > 0 else 0
                 st.metric("🌡️ Ort. Kış/Yaz Oranı", f"{avg_ratio:.2f}",
                          delta="Normal: 5-10")
             
@@ -332,9 +376,10 @@ if uploaded_file is not None:
                     if anomalies != 'Anomali tespit edilmedi':
                         anomaly_types.extend([a.split(':')[0].strip() for a in anomalies.split('|')])
                 
-                anomaly_counts = pd.Series(anomaly_types).value_counts().reset_index()
-                anomaly_counts.columns = ['Anomali Türü', 'Tespit Sayısı']
-                anomaly_counts.to_excel(writer, sheet_name='Anomali Türleri', index=False)
+                if anomaly_types:
+                    anomaly_counts = pd.Series(anomaly_types).value_counts().reset_index()
+                    anomaly_counts.columns = ['Anomali Türü', 'Tespit Sayısı']
+                    anomaly_counts.to_excel(writer, sheet_name='Anomali Türleri', index=False)
             
             output.seek(0)
             
@@ -431,6 +476,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray;'>
-    <p>🔥 Doğalgaz Kaçak Tespit Sistemi v1.0 | 12 Kural ile Anomali Tespiti</p>
+    <p>🔥 Doğalgaz Kaçak Tespit Sistemi v1.1 | 12 Kural ile Anomali Tespiti</p>
 </div>
 """, unsafe_allow_html=True)
