@@ -555,4 +555,5 @@ st.sidebar.markdown(f"""
 - 📉 **Ani Düşüş**: %{ani_dusus_orani}+ düşüş
 - 🌡️ **Kış-Yaz Farkı**: < 10 m³ fark
 - ⚠️ **Toplam Tüketim**: < 500 m³
-- 🚫 **Sıfır Tü
+- 🚫 **Sıfır Tüketim**: 6+ ay sıfır
+""")
