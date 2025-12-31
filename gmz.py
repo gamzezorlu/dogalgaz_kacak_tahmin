@@ -5,55 +5,176 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import PatternFill, Font, Alignment
+from scipy import stats
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
 
 st.set_page_config(page_title="Doğalgaz Kaçak Tespit", layout="wide", page_icon="🔥")
 
 # Başlık
-st.title("🔥 Doğalgaz Kaçak Kullanım Tespit Sistemi")
+st.title("🔥 Gelişmiş Doğalgaz Kaçak Kullanım Tespit Sistemi")
+st.markdown("### 🤖 Makine Öğrenmesi ve İstatistiksel Analiz ile Anomali Tespiti")
 st.markdown("---")
 
 # Sidebar - Parametreler
 with st.sidebar:
     st.header("⚙️ Analiz Parametreleri")
     
-    dusus_esigi = st.slider("Ani Düşüş Eşiği (%)", 0, 100, 70, 5,
-                            help="Bir aydan diğerine bu %'den fazla düşüş şüpheli sayılır")
-    
-    sifir_ay = st.slider("Min. Sıfır Tüketim (Ay)", 1, 12, 3,
-                         help="Bu kadar ay üst üste sıfır tüketim şüpheli sayılır")
-    
-    bina_sapma_carpan = st.slider("Bina Sapma Çarpanı", 1.0, 5.0, 2.5, 0.5,
-                                   help="Bina ortalamasından bu kadar std sapma uzak olanlar şüpheli")
-    
-    min_bina_daire = st.number_input("Min. Daire Sayısı (Bina Analizi)", 2, 50, 3,
-                                      help="Bina analizinde en az bu kadar daire olmalı")
+    st.subheader("📊 Temel Kriterler")
+    dusus_esigi = st.slider("Ani Düşüş Eşiği (%)", 30, 95, 60, 5)
+    sifir_ay = st.slider("Min. Sıfır Tüketim (Ay)", 1, 12, 3)
+    bina_sapma_carpan = st.slider("Bina Z-Score Eşiği", 1.0, 4.0, 2.0, 0.5)
+    min_bina_daire = st.number_input("Min. Daire Sayısı", 2, 20, 3)
     
     st.markdown("---")
-    st.markdown("### 📊 Tespit Yöntemleri")
+    st.subheader("🧠 Makine Öğrenmesi")
+    use_ml = st.checkbox("ML Anomali Tespiti Kullan", value=True)
+    ml_contamination = st.slider("ML Anomali Oranı", 0.01, 0.20, 0.05, 0.01,
+                                   help="Veri setindeki beklenen anomali oranı")
+    
+    st.markdown("---")
+    st.subheader("📈 Trend Analizi")
+    check_trend = st.checkbox("Trend Değişimi Analizi", value=True)
+    trend_change_threshold = st.slider("Trend Değişim Eşiği (%)", 30, 90, 50, 10)
+    
+    st.markdown("---")
+    st.subheader("🔍 Patern Analizi")
+    check_seasonality = st.checkbox("Mevsimsellik Analizi", value=True)
+    check_outliers = st.checkbox("İstatistiksel Aykırı Değerler", value=True)
+    
+    st.markdown("---")
+    st.markdown("### 📋 Tespit Yöntemleri")
     st.markdown("""
-    - **Ani Düşüş**: Tüketimde keskin düşüş
-    - **Sıfır Tüketim**: Uzun süre sıfır kayıt
-    - **Bina Anomalisi**: Aynı binadaki diğer dairelere göre anormal tüketim
-    - **Yüksek Varyasyon**: Düzensiz tüketim paterni
+    **1. Bina Karşılaştırma**
+    - Z-score ile istatistiksel sapma
+    - Binadaki diğer dairelerle karşılaştırma
+    
+    **2. Trend Analizi**
+    - Tüketim trendinde ani değişim
+    - Düşüş/artış paternleri
+    
+    **3. Makine Öğrenmesi**
+    - Isolation Forest algoritması
+    - Çok boyutlu anomali tespiti
+    
+    **4. İstatistiksel Testler**
+    - Grubbs testi (aykırı değer)
+    - Mevsimsellik kontrolü
+    
+    **5. Sıfır Tüketim**
+    - Uzun süreli sıfır kayıtlar
+    - Ardışık sıfır dönemler
     """)
 
 # Dosya yükleme
 uploaded_file = st.file_uploader("📁 Excel Dosyası Yükleyin", type=['xlsx', 'xls'])
 
+def calculate_trend(values):
+    """Lineer trend hesapla"""
+    x = np.arange(len(values))
+    valid_idx = ~np.isnan(values)
+    if np.sum(valid_idx) < 2:
+        return 0, 0
+    slope, intercept = np.polyfit(x[valid_idx], values[valid_idx], 1)
+    return slope, intercept
+
+def detect_trend_change(values, window=6):
+    """Trend değişimi tespit et"""
+    if len(values) < window * 2:
+        return []
+    
+    changes = []
+    for i in range(window, len(values) - window):
+        before = values[i-window:i]
+        after = values[i:i+window]
+        
+        if len(before[before > 0]) < 3 or len(after[after > 0]) < 3:
+            continue
+        
+        slope_before, _ = calculate_trend(before)
+        slope_after, _ = calculate_trend(after)
+        
+        if slope_before != 0:
+            change_pct = abs((slope_after - slope_before) / slope_before * 100)
+            if change_pct > trend_change_threshold:
+                changes.append({
+                    'index': i,
+                    'slope_before': slope_before,
+                    'slope_after': slope_after,
+                    'change_pct': change_pct
+                })
+    
+    return changes
+
+def grubbs_test(data, alpha=0.05):
+    """Grubbs testi ile aykırı değer tespiti"""
+    data = data[data > 0]
+    if len(data) < 3:
+        return []
+    
+    outliers = []
+    while True:
+        mean = np.mean(data)
+        std = np.std(data)
+        if std == 0:
+            break
+        
+        abs_val = np.abs(data - mean)
+        max_idx = np.argmax(abs_val)
+        max_val = data[max_idx]
+        G = abs_val[max_idx] / std
+        
+        n = len(data)
+        t_dist = stats.t.ppf(1 - alpha / (2 * n), n - 2)
+        threshold = ((n - 1) * np.sqrt(np.square(t_dist))) / (np.sqrt(n) * np.sqrt(n - 2 + np.square(t_dist)))
+        
+        if G > threshold:
+            outliers.append(max_val)
+            data = np.delete(data, max_idx)
+        else:
+            break
+        
+        if len(data) < 3:
+            break
+    
+    return outliers
+
+def check_seasonality(values, period=12):
+    """Mevsimsellik kontrolü - basit yöntem"""
+    if len(values) < period * 2:
+        return False, 0
+    
+    values = values[values > 0]
+    if len(values) < period:
+        return False, 0
+    
+    # Otokorelasyon hesapla
+    mean = np.mean(values)
+    var = np.var(values)
+    if var == 0:
+        return False, 0
+    
+    autocorr = np.correlate(values - mean, values - mean, mode='full')
+    autocorr = autocorr[len(autocorr)//2:]
+    autocorr = autocorr / (var * len(values))
+    
+    if len(autocorr) > period:
+        seasonal_corr = autocorr[period]
+        return seasonal_corr > 0.3, seasonal_corr
+    
+    return False, 0
+
 if uploaded_file is not None:
     try:
         # Excel dosyasını oku
         df = pd.read_excel(uploaded_file)
-        
-        # Sütun isimlerini temizle
         df.columns = df.columns.str.strip()
         
         st.success(f"✅ {len(df)} satır veri yüklendi")
         
-        # Ay sütunlarını bul (2019/1, 2023/07 formatında)
-        ay_sutunlari = [col for col in df.columns if '/' in str(col) or col.isdigit()]
+        # Ay sütunlarını bul
+        ay_sutunlari = [col for col in df.columns if '/' in str(col) or (col not in ['tn', 'bn'] and col.replace('.','').isdigit())]
         
         # Veriyi numerik yap
         for col in ay_sutunlari:
@@ -75,379 +196,468 @@ if uploaded_file is not None:
         
         st.markdown("---")
         
-        # Analiz fonksiyonları
-        def bina_analizi(df, bn_col, ay_cols):
-            """Bina bazında anomali tespiti"""
+        # Analiz başlat
+        with st.spinner("🔍 Gelişmiş anomali tespiti yapılıyor..."):
+            
+            all_anomalies = {}  # Tesisat bazında tüm anomaliler
+            
+            # 1. Bina bazlı analiz
+            st.info("📊 1/6 - Bina bazlı istatistiksel analiz...")
             bina_anomaliler = []
             
-            for bina in df[bn_col].unique():
-                bina_df = df[df[bn_col] == bina].copy()
+            for bina in df['bn'].unique():
+                bina_df = df[df['bn'] == bina].copy()
                 
                 if len(bina_df) < min_bina_daire:
                     continue
                 
-                # Her ay için bina ortalaması ve std sapma
-                for ay in ay_cols:
-                    bina_ort = bina_df[ay].mean()
-                    bina_std = bina_df[ay].std()
+                for ay in ay_sutunlari:
+                    bina_values = bina_df[ay].values
+                    bina_ort = np.mean(bina_values)
+                    bina_std = np.std(bina_values)
                     
-                    if bina_std == 0 or pd.isna(bina_std):
+                    if bina_std == 0 or pd.isna(bina_std) or bina_ort < 5:
                         continue
                     
-                    # Her daire için kontrol
                     for idx, row in bina_df.iterrows():
                         deger = row[ay]
-                        z_score = abs((deger - bina_ort) / bina_std) if bina_std > 0 else 0
+                        z_score = (deger - bina_ort) / bina_std
                         
-                        if z_score > bina_sapma_carpan and bina_ort > 10:
-                            bina_anomaliler.append({
-                                'tn': row['tn'],
-                                'bn': bina,
+                        if abs(z_score) > bina_sapma_carpan:
+                            tn = row['tn']
+                            if tn not in all_anomalies:
+                                all_anomalies[tn] = {'tn': tn, 'bn': row['bn'], 'anomalies': []}
+                            
+                            all_anomalies[tn]['anomalies'].append({
+                                'type': 'Bina Anomalisi',
                                 'ay': ay,
                                 'deger': deger,
                                 'bina_ort': bina_ort,
-                                'bina_std': bina_std,
                                 'z_score': z_score,
-                                'sapma_tipi': 'Düşük' if deger < bina_ort else 'Yüksek'
+                                'severity': 'high' if abs(z_score) > 3 else 'medium'
                             })
             
-            return pd.DataFrame(bina_anomaliler)
-        
-        def ani_dusus_tespiti(df, ay_cols):
-            """Ani düşüş tespiti"""
-            sonuclar = []
-            
+            # 2. Ani düşüş analizi
+            st.info("📉 2/6 - Ani düşüş ve değişim analizi...")
             for idx, row in df.iterrows():
-                for i in range(1, len(ay_cols)):
-                    onceki = row[ay_cols[i-1]]
-                    simdiki = row[ay_cols[i]]
+                tn = row['tn']
+                bn = row['bn']
+                
+                for i in range(1, len(ay_sutunlari)):
+                    onceki = row[ay_sutunlari[i-1]]
+                    simdiki = row[ay_sutunlari[i]]
                     
-                    if onceki > 0 and simdiki >= 0:
+                    if onceki > 10 and simdiki >= 0:
                         dusus_orani = ((onceki - simdiki) / onceki) * 100
                         
                         if dusus_orani >= dusus_esigi:
-                            sonuclar.append({
-                                'tn': row['tn'],
-                                'bn': row['bn'],
-                                'onceki_ay': ay_cols[i-1],
-                                'simdiki_ay': ay_cols[i],
+                            if tn not in all_anomalies:
+                                all_anomalies[tn] = {'tn': tn, 'bn': bn, 'anomalies': []}
+                            
+                            all_anomalies[tn]['anomalies'].append({
+                                'type': 'Ani Düşüş',
+                                'ay': ay_sutunlari[i],
+                                'onceki_ay': ay_sutunlari[i-1],
                                 'onceki_deger': onceki,
-                                'simdiki_deger': simdiki,
-                                'dusus_orani': dusus_orani
+                                'deger': simdiki,
+                                'dusus_orani': dusus_orani,
+                                'severity': 'high' if dusus_orani > 80 else 'medium'
                             })
             
-            return pd.DataFrame(sonuclar)
-        
-        def sifir_tuketim_tespiti(df, ay_cols):
-            """Sıfır tüketim tespiti"""
-            sonuclar = []
-            
+            # 3. Sıfır tüketim analizi
+            st.info("⭕ 3/6 - Sıfır tüketim dönemleri analizi...")
             for idx, row in df.iterrows():
+                tn = row['tn']
+                bn = row['bn']
                 sifir_sayaci = 0
-                baslangic_ay = None
+                baslangic = None
                 
-                for ay in ay_cols:
+                for ay in ay_sutunlari:
                     if row[ay] == 0:
                         if sifir_sayaci == 0:
-                            baslangic_ay = ay
+                            baslangic = ay
                         sifir_sayaci += 1
                     else:
                         if sifir_sayaci >= sifir_ay:
-                            sonuclar.append({
-                                'tn': row['tn'],
-                                'bn': row['bn'],
-                                'baslangic': baslangic_ay,
-                                'bitis': ay_cols[ay_cols.index(ay) - 1] if ay_cols.index(ay) > 0 else ay,
-                                'sure_ay': sifir_sayaci
+                            if tn not in all_anomalies:
+                                all_anomalies[tn] = {'tn': tn, 'bn': bn, 'anomalies': []}
+                            
+                            all_anomalies[tn]['anomalies'].append({
+                                'type': 'Sıfır Tüketim',
+                                'baslangic': baslangic,
+                                'bitis': ay_sutunlari[ay_sutunlari.index(ay) - 1],
+                                'sure_ay': sifir_sayaci,
+                                'severity': 'high' if sifir_sayaci >= 6 else 'medium'
                             })
                         sifir_sayaci = 0
-                        baslangic_ay = None
+                        baslangic = None
                 
-                # Son ay sıfırsa
                 if sifir_sayaci >= sifir_ay:
-                    sonuclar.append({
-                        'tn': row['tn'],
-                        'bn': row['bn'],
-                        'baslangic': baslangic_ay,
-                        'bitis': ay_cols[-1],
-                        'sure_ay': sifir_sayaci
+                    if tn not in all_anomalies:
+                        all_anomalies[tn] = {'tn': tn, 'bn': bn, 'anomalies': []}
+                    
+                    all_anomalies[tn]['anomalies'].append({
+                        'type': 'Sıfır Tüketim',
+                        'baslangic': baslangic,
+                        'bitis': ay_sutunlari[-1],
+                        'sure_ay': sifir_sayaci,
+                        'severity': 'high' if sifir_sayaci >= 6 else 'medium'
                     })
             
-            return pd.DataFrame(sonuclar)
-        
-        def varyasyon_analizi(df, ay_cols):
-            """Varyasyon katsayısı analizi"""
-            sonuclar = []
-            
-            for idx, row in df.iterrows():
-                degerler = [row[ay] for ay in ay_cols if row[ay] > 0]
-                
-                if len(degerler) >= 3:
-                    ortalama = np.mean(degerler)
-                    std_sapma = np.std(degerler)
-                    cv = (std_sapma / ortalama * 100) if ortalama > 0 else 0
+            # 4. Trend değişimi analizi
+            if check_trend:
+                st.info("📈 4/6 - Trend değişimi analizi...")
+                for idx, row in df.iterrows():
+                    tn = row['tn']
+                    bn = row['bn']
+                    values = row[ay_sutunlari].values
                     
-                    if cv > 80:
-                        sonuclar.append({
-                            'tn': row['tn'],
-                            'bn': row['bn'],
-                            'ortalama': ortalama,
-                            'std_sapma': std_sapma,
-                            'cv': cv
+                    trend_changes = detect_trend_change(values)
+                    
+                    if trend_changes:
+                        if tn not in all_anomalies:
+                            all_anomalies[tn] = {'tn': tn, 'bn': bn, 'anomalies': []}
+                        
+                        for tc in trend_changes:
+                            all_anomalies[tn]['anomalies'].append({
+                                'type': 'Trend Değişimi',
+                                'ay': ay_sutunlari[tc['index']],
+                                'degisim_orani': tc['change_pct'],
+                                'onceki_trend': tc['slope_before'],
+                                'sonraki_trend': tc['slope_after'],
+                                'severity': 'high' if tc['change_pct'] > 80 else 'medium'
+                            })
+            
+            # 5. İstatistiksel aykırı değer (Grubbs test)
+            if check_outliers:
+                st.info("🔬 5/6 - İstatistiksel aykırı değer analizi...")
+                for idx, row in df.iterrows():
+                    tn = row['tn']
+                    bn = row['bn']
+                    values = row[ay_sutunlari].values
+                    
+                    outliers = grubbs_test(values.copy())
+                    
+                    if outliers:
+                        if tn not in all_anomalies:
+                            all_anomalies[tn] = {'tn': tn, 'bn': bn, 'anomalies': []}
+                        
+                        all_anomalies[tn]['anomalies'].append({
+                            'type': 'İstatistiksel Aykırı Değer',
+                            'outlier_count': len(outliers),
+                            'outlier_values': outliers,
+                            'severity': 'medium'
                         })
             
-            return pd.DataFrame(sonuclar)
-        
-        # Analizleri çalıştır
-        with st.spinner("🔍 Anomaliler tespit ediliyor..."):
-            bina_anom = bina_analizi(df, 'bn', ay_sutunlari)
-            ani_dusus = ani_dusus_tespiti(df, ay_sutunlari)
-            sifir_tuketim = sifir_tuketim_tespiti(df, ay_sutunlari)
-            varyasyon = varyasyon_analizi(df, ay_sutunlari)
+            # 6. Machine Learning - Isolation Forest
+            if use_ml:
+                st.info("🤖 6/6 - Makine öğrenmesi anomali tespiti...")
+                
+                # Özellik mühendisliği
+                features_list = []
+                tn_list = []
+                
+                for idx, row in df.iterrows():
+                    values = row[ay_sutunlari].values
+                    non_zero = values[values > 0]
+                    
+                    if len(non_zero) < 3:
+                        continue
+                    
+                    features = {
+                        'mean': np.mean(non_zero),
+                        'std': np.std(non_zero),
+                        'cv': (np.std(non_zero) / np.mean(non_zero)) if np.mean(non_zero) > 0 else 0,
+                        'max': np.max(values),
+                        'min': np.min(non_zero),
+                        'range': np.max(values) - np.min(non_zero),
+                        'zero_count': np.sum(values == 0),
+                        'trend': calculate_trend(values)[0],
+                        'q1': np.percentile(non_zero, 25),
+                        'q3': np.percentile(non_zero, 75),
+                    }
+                    
+                    features_list.append(list(features.values()))
+                    tn_list.append(row['tn'])
+                
+                if len(features_list) > 10:
+                    X = np.array(features_list)
+                    
+                    # Normalizasyon
+                    scaler = StandardScaler()
+                    X_scaled = scaler.fit_transform(X)
+                    
+                    # Isolation Forest
+                    iso_forest = IsolationForest(contamination=ml_contamination, random_state=42)
+                    predictions = iso_forest.fit_predict(X_scaled)
+                    scores = iso_forest.score_samples(X_scaled)
+                    
+                    # Anomali olanları işaretle
+                    for i, (pred, score) in enumerate(zip(predictions, scores)):
+                        if pred == -1:  # Anomali
+                            tn = tn_list[i]
+                            bn = df[df['tn'] == tn]['bn'].values[0]
+                            
+                            if tn not in all_anomalies:
+                                all_anomalies[tn] = {'tn': tn, 'bn': bn, 'anomalies': []}
+                            
+                            all_anomalies[tn]['anomalies'].append({
+                                'type': 'ML Anomali',
+                                'anomaly_score': abs(score),
+                                'severity': 'high' if abs(score) > 0.5 else 'medium'
+                            })
         
         # Risk skoru hesapla
-        def risk_skoru_hesapla(tn, bn):
-            skor = 0
+        def calculate_comprehensive_risk(anomalies):
+            score = 0
+            weights = {
+                'Bina Anomalisi': 35,
+                'Ani Düşüş': 30,
+                'Sıfır Tüketim': 25,
+                'Trend Değişimi': 20,
+                'ML Anomali': 40,
+                'İstatistiksel Aykırı Değer': 15
+            }
             
-            # Bina anomalisi (en önemli)
-            if len(bina_anom) > 0:
-                bina_say = len(bina_anom[(bina_anom['tn'] == tn) & (bina_anom['sapma_tipi'] == 'Düşük')])
-                skor += bina_say * 40
+            severity_multiplier = {'high': 1.5, 'medium': 1.0, 'low': 0.5}
             
-            # Ani düşüş
-            if len(ani_dusus) > 0:
-                dusus_say = len(ani_dusus[ani_dusus['tn'] == tn])
-                skor += dusus_say * 30
+            for anom in anomalies:
+                base_score = weights.get(anom['type'], 10)
+                mult = severity_multiplier.get(anom.get('severity', 'medium'), 1.0)
+                score += base_score * mult
             
-            # Sıfır tüketim
-            if len(sifir_tuketim) > 0:
-                sifir_say = len(sifir_tuketim[sifir_tuketim['tn'] == tn])
-                skor += sifir_say * 25
-            
-            # Varyasyon
-            if len(varyasyon) > 0 and tn in varyasyon['tn'].values:
-                cv_deger = varyasyon[varyasyon['tn'] == tn]['cv'].values[0]
-                skor += min(cv_deger / 10, 20)
-            
-            return skor
+            return score
         
-        # Şüpheli tesisatları topla
-        tum_supheliler = set()
-        if len(bina_anom) > 0:
-            tum_supheliler.update(bina_anom['tn'].unique())
-        if len(ani_dusus) > 0:
-            tum_supheliler.update(ani_dusus['tn'].unique())
-        if len(sifir_tuketim) > 0:
-            tum_supheliler.update(sifir_tuketim['tn'].unique())
-        if len(varyasyon) > 0:
-            tum_supheliler.update(varyasyon['tn'].unique())
+        # Sonuçları hazırla
+        results = []
+        for tn, data in all_anomalies.items():
+            risk_score = calculate_comprehensive_risk(data['anomalies'])
+            
+            # Anomali sayıları
+            anom_counts = {}
+            for anom in data['anomalies']:
+                anom_type = anom['type']
+                anom_counts[anom_type] = anom_counts.get(anom_type, 0) + 1
+            
+            results.append({
+                'tn': tn,
+                'bn': data['bn'],
+                'risk_score': risk_score,
+                'anomaly_count': len(data['anomalies']),
+                'anomaly_types': anom_counts,
+                'anomalies': data['anomalies']
+            })
         
-        # Risk skorları ile sırala
-        skor_listesi = []
-        for tn in tum_supheliler:
-            bn = df[df['tn'] == tn]['bn'].values[0]
-            skor = risk_skoru_hesapla(tn, bn)
-            skor_listesi.append({'tn': tn, 'bn': bn, 'risk_skoru': skor})
-        
-        skor_df = pd.DataFrame(skor_listesi).sort_values('risk_skoru', ascending=False)
+        # Risk skoruna göre sırala
+        results.sort(key=lambda x: x['risk_score'], reverse=True)
         
         # Sonuçlar
+        st.success("✅ Analiz tamamlandı!")
+        st.markdown("---")
         st.header("📊 Analiz Sonuçları")
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("🏢 Bina Anomalisi", len(bina_anom['tn'].unique()) if len(bina_anom) > 0 else 0)
+            st.metric("🚨 Toplam Şüpheli", len(results))
         with col2:
-            st.metric("📉 Ani Düşüş", len(ani_dusus['tn'].unique()) if len(ani_dusus) > 0 else 0)
+            high_risk = sum(1 for r in results if r['risk_score'] >= 150)
+            st.metric("🔴 Yüksek Risk", high_risk)
         with col3:
-            st.metric("⭕ Sıfır Tüketim", len(sifir_tuketim['tn'].unique()) if len(sifir_tuketim) > 0 else 0)
+            medium_risk = sum(1 for r in results if 80 <= r['risk_score'] < 150)
+            st.metric("🟡 Orta Risk", medium_risk)
         with col4:
-            st.metric("📊 Yüksek Varyasyon", len(varyasyon) if len(varyasyon) > 0 else 0)
+            low_risk = sum(1 for r in results if r['risk_score'] < 80)
+            st.metric("🟢 Düşük Risk", low_risk)
         
-        st.markdown("---")
-        
-        if len(skor_df) > 0:
-            st.subheader(f"🚨 Toplam {len(skor_df)} Şüpheli Tesisat Tespit Edildi")
-            
-            # Risk dağılımı
-            yuksek_risk = len(skor_df[skor_df['risk_skoru'] >= 100])
-            orta_risk = len(skor_df[(skor_df['risk_skoru'] >= 50) & (skor_df['risk_skoru'] < 100)])
-            dusuk_risk = len(skor_df[skor_df['risk_skoru'] < 50])
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("🔴 Yüksek Risk (≥100)", yuksek_risk)
-            with col2:
-                st.metric("🟡 Orta Risk (50-99)", orta_risk)
-            with col3:
-                st.metric("🟢 Düşük Risk (<50)", dusuk_risk)
-            
+        if results:
             st.markdown("---")
+            st.subheader(f"🔍 En Yüksek Riskli {min(20, len(results))} Tesisat")
             
             # Detaylı sonuçlar
-            for idx, row in skor_df.head(20).iterrows():
-                tn = row['tn']
-                bn = row['bn']
-                skor = row['risk_skoru']
+            for result in results[:20]:
+                tn = result['tn']
+                bn = result['bn']
+                score = result['risk_score']
                 
                 # Risk seviyesi
-                if skor >= 100:
-                    risk_renk = "🔴"
-                    risk_etiket = "YÜKSEK RİSK"
-                elif skor >= 50:
-                    risk_renk = "🟡"
-                    risk_etiket = "ORTA RİSK"
+                if score >= 150:
+                    risk_color = "🔴"
+                    risk_label = "KRİTİK RİSK"
+                    border_color = "red"
+                elif score >= 80:
+                    risk_color = "🟡"
+                    risk_label = "ORTA RİSK"
+                    border_color = "orange"
                 else:
-                    risk_renk = "🟢"
-                    risk_etiket = "DÜŞÜK RİSK"
+                    risk_color = "🟢"
+                    risk_label = "DÜŞÜK RİSK"
+                    border_color = "green"
                 
-                with st.expander(f"{risk_renk} **Tesisat: {tn}** | Bina: {bn} | Risk: {skor:.0f} - {risk_etiket}"):
+                with st.expander(f"{risk_color} **Tesisat: {tn}** | Bina: {bn} | Risk Skoru: {score:.1f} - {risk_label}"):
                     col1, col2 = st.columns([2, 1])
                     
                     with col1:
-                        # Tüketim grafiği
+                        # Tüketim grafiği + bina ortalaması
                         tesisat_data = df[df['tn'] == tn][ay_sutunlari].values[0]
                         bina_data = df[df['bn'] == bn][ay_sutunlari].mean().values
                         
                         fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=ay_sutunlari, y=tesisat_data, 
-                                                name='Tesisat', mode='lines+markers',
-                                                line=dict(color='red', width=2)))
-                        fig.add_trace(go.Scatter(x=ay_sutunlari, y=bina_data, 
-                                                name='Bina Ortalaması', mode='lines',
-                                                line=dict(color='blue', width=2, dash='dash')))
+                        fig.add_trace(go.Scatter(
+                            x=ay_sutunlari, y=tesisat_data,
+                            name='Tesisat', mode='lines+markers',
+                            line=dict(color='red', width=3),
+                            marker=dict(size=8)
+                        ))
+                        fig.add_trace(go.Scatter(
+                            x=ay_sutunlari, y=bina_data,
+                            name='Bina Ortalaması', mode='lines',
+                            line=dict(color='blue', width=2, dash='dash')
+                        ))
                         
-                        fig.update_layout(title=f'Tesisat {tn} - Bina {bn} Karşılaştırması',
-                                        xaxis_title='Ay', yaxis_title='Tüketim',
-                                        height=300, hovermode='x unified')
+                        # Anomali noktalarını işaretle
+                        anomaly_months = []
+                        anomaly_values = []
+                        for anom in result['anomalies']:
+                            if 'ay' in anom and anom['ay'] in ay_sutunlari:
+                                idx = ay_sutunlari.index(anom['ay'])
+                                anomaly_months.append(anom['ay'])
+                                anomaly_values.append(tesisat_data[idx])
+                        
+                        if anomaly_months:
+                            fig.add_trace(go.Scatter(
+                                x=anomaly_months, y=anomaly_values,
+                                name='Anomali', mode='markers',
+                                marker=dict(color='orange', size=15, symbol='x', line=dict(width=2))
+                            ))
+                        
+                        fig.update_layout(
+                            title=f'Tesisat {tn} - Bina {bn} Tüketim Analizi',
+                            xaxis_title='Ay',
+                            yaxis_title='Tüketim',
+                            height=350,
+                            hovermode='x unified',
+                            showlegend=True
+                        )
                         st.plotly_chart(fig, use_container_width=True)
                     
                     with col2:
-                        st.markdown("### 📋 Tespit Detayları")
+                        st.markdown("### 📋 Anomali Detayları")
+                        st.markdown(f"**Toplam Anomali:** {result['anomaly_count']}")
                         
-                        # Bina anomalisi
-                        if len(bina_anom) > 0:
-                            tn_bina_anom = bina_anom[bina_anom['tn'] == tn]
-                            if len(tn_bina_anom) > 0:
-                                st.markdown(f"**🏢 Bina Anomalisi:** {len(tn_bina_anom)} ay")
-                                dusuk_anom = tn_bina_anom[tn_bina_anom['sapma_tipi'] == 'Düşük']
-                                if len(dusuk_anom) > 0:
-                                    for _, anom in dusuk_anom.head(3).iterrows():
-                                        st.markdown(f"- {anom['ay']}: {anom['deger']:.0f} (Bina ort: {anom['bina_ort']:.0f})")
+                        # Anomali tiplerine göre grupla
+                        for anom_type, count in result['anomaly_types'].items():
+                            st.markdown(f"**{anom_type}:** {count}")
                         
-                        # Ani düşüş
-                        if len(ani_dusus) > 0:
-                            tn_dusus = ani_dusus[ani_dusus['tn'] == tn]
-                            if len(tn_dusus) > 0:
-                                st.markdown(f"**📉 Ani Düşüş:** {len(tn_dusus)} kez")
-                                for _, d in tn_dusus.head(3).iterrows():
-                                    st.markdown(f"- {d['simdiki_ay']}: %{d['dusus_orani']:.1f} düşüş")
+                        st.markdown("---")
+                        st.markdown("### 🔎 Detaylar")
                         
-                        # Sıfır tüketim
-                        if len(sifir_tuketim) > 0:
-                            tn_sifir = sifir_tuketim[sifir_tuketim['tn'] == tn]
-                            if len(tn_sifir) > 0:
-                                st.markdown(f"**⭕ Sıfır Tüketim:** {len(tn_sifir)} dönem")
-                                for _, s in tn_sifir.head(2).iterrows():
-                                    st.markdown(f"- {s['baslangic']} - {s['bitis']}: {s['sure_ay']} ay")
-                        
-                        # Varyasyon
-                        if len(varyasyon) > 0 and tn in varyasyon['tn'].values:
-                            tn_var = varyasyon[varyasyon['tn'] == tn].iloc[0]
-                            st.markdown(f"**📊 Varyasyon:** CV = %{tn_var['cv']:.1f}")
+                        for anom in result['anomalies'][:5]:
+                            anom_type = anom['type']
+                            severity_emoji = "🔴" if anom.get('severity') == 'high' else "🟡"
+                            
+                            st.markdown(f"{severity_emoji} **{anom_type}**")
+                            
+                            if anom_type == 'Bina Anomalisi':
+                                st.markdown(f"- {anom['ay']}: {anom['deger']:.0f} (Z-score: {anom['z_score']:.2f})")
+                                st.markdown(f"  Bina ort: {anom['bina_ort']:.0f}")
+                            
+                            elif anom_type == 'Ani Düşüş':
+                                st.markdown(f"- {anom['ay']}: %{anom['dusus_orani']:.1f} düşüş")
+                                st.markdown(f"  {anom['onceki_deger']:.0f} → {anom['deger']:.0f}")
+                            
+                            elif anom_type == 'Sıfır Tüketim':
+                                st.markdown(f"- {anom['baslangic']} - {anom['bitis']}")
+                                st.markdown(f"  {anom['sure_ay']} ay sıfır")
+                            
+                            elif anom_type == 'Trend Değişimi':
+                                st.markdown(f"- {anom['ay']}: %{anom['degisim_orani']:.1f} değişim")
+                            
+                            elif anom_type == 'ML Anomali':
+                                st.markdown(f"- Anomali skoru: {anom['anomaly_score']:.3f}")
             
-            # Excel export
+            # Excel raporu oluştur
             st.markdown("---")
-            st.subheader("📥 Rapor İndir")
+            st.subheader("📥 Detaylı Rapor İndir")
             
-            # Tüm şüpheli tesisatların detaylı raporu
-            rapor_data = []
-            for _, row in skor_df.iterrows():
-                tn = row['tn']
-                bn = row['bn']
-                
-                # Tesisat verisini al
-                tesisat_row = df[df['tn'] == tn].iloc[0]
-                
-                detay = {
-                    'Tesisat No': tn,
-                    'Bina No': bn,
-                    'Risk Skoru': round(row['risk_skoru'], 2)
-                }
-                
-                # Anomali detayları
-                bina_anom_count = len(bina_anom[bina_anom['tn'] == tn]) if len(bina_anom) > 0 else 0
-                ani_dusus_count = len(ani_dusus[ani_dusus['tn'] == tn]) if len(ani_dusus) > 0 else 0
-                sifir_count = len(sifir_tuketim[sifir_tuketim['tn'] == tn]) if len(sifir_tuketim) > 0 else 0
-                
-                detay['Bina Anomali Sayısı'] = bina_anom_count
-                detay['Ani Düşüş Sayısı'] = ani_dusus_count
-                detay['Sıfır Tüketim Dönem'] = sifir_count
-                
-                # Varyasyon
-                if len(varyasyon) > 0 and tn in varyasyon['tn'].values:
-                    cv_val = varyasyon[varyasyon['tn'] == tn]['cv'].values[0]
-                    detay['Varyasyon Katsayısı (%)'] = round(cv_val, 2)
-                else:
-                    detay['Varyasyon Katsayısı (%)'] = 0
-                
-                # Risk kategorisi
-                if row['risk_skoru'] >= 100:
-                    detay['Risk Seviyesi'] = 'YÜKSEK'
-                elif row['risk_skoru'] >= 50:
-                    detay['Risk Seviyesi'] = 'ORTA'
-                else:
-                    detay['Risk Seviyesi'] = 'DÜŞÜK'
-                
-                # Aylık tüketim verilerini ekle
-                for ay in ay_sutunlari:
-                    detay[ay] = tesisat_row[ay]
-                
-                rapor_data.append(detay)
-            
-            rapor_df = pd.DataFrame(rapor_data)
-            
-            # Excel oluştur
-            def create_excel_report(df_rapor, df_bina_anom, df_dusus, df_sifir, df_var):
+            def create_detailed_excel(results, df, ay_sutunlari):
                 output = BytesIO()
-                writer = pd.ExcelWriter(output, engine='openpyxl')
                 
-                # Sheet 1: Ana Rapor
-                df_rapor.to_excel(writer, sheet_name='Şüpheli Tesisatlar', index=False)
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    # Sheet 1: Özet
+                    summary_data = []
+                    for r in results:
+                        row = {
+                            'Tesisat No': r['tn'],
+                            'Bina No': r['bn'],
+                            'Risk Skoru': round(r['risk_score'], 2),
+                            'Toplam Anomali': r['anomaly_count']
+                        }
+                        
+                        # Risk seviyesi
+                        if r['risk_score'] >= 150:
+                            row['Risk Seviyesi'] = 'KRİTİK'
+                        elif r['risk_score'] >= 80:
+                            row['Risk Seviyesi'] = 'ORTA'
+                        else:
+                            row['Risk Seviyesi'] = 'DÜŞÜK'
+                        
+                        # Anomali tipleri
+                        for anom_type, count in r['anomaly_types'].items():
+                            row[anom_type] = count
+                        
+                        # Aylık veriler
+                        tesisat_row = df[df['tn'] == r['tn']].iloc[0]
+                        for ay in ay_sutunlari:
+                            row[ay] = tesisat_row[ay]
+                        
+                        summary_data.append(row)
+                    
+                    summary_df = pd.DataFrame(summary_data)
+                    summary_df.to_excel(writer, sheet_name='Özet Rapor', index=False)
+                    
+                    # Sheet 2: Detaylı anomaliler
+                    detailed_data = []
+                    for r in results:
+                        for anom in r['anomalies']:
+                            detailed_row = {
+                                'Tesisat No': r['tn'],
+                                'Bina No': r['bn'],
+                                'Anomali Tipi': anom['type'],
+                                'Önem': anom.get('severity', 'medium').upper()
+                            }
+                            
+                            # Tip-specific detaylar
+                            if 'ay' in anom:
+                                detailed_row['Ay'] = anom['ay']
+                            if 'deger' in anom:
+                                detailed_row['Değer'] = anom['deger']
+                            if 'dusus_orani' in anom:
+                                detailed_row['Düşüş Oranı (%)'] = round(anom['dusus_orani'], 2)
+                            if 'z_score' in anom:
+                                detailed_row['Z-Score'] = round(anom['z_score'], 2)
+                            if 'sure_ay' in anom:
+                                detailed_row['Süre (Ay)'] = anom['sure_ay']
+                            
+                            detailed_data.append(detailed_row)
+                    
+                    if detailed_data:
+                        detailed_df = pd.DataFrame(detailed_data)
+                        detailed_df.to_excel(writer, sheet_name='Detaylı Anomaliler', index=False)
                 
-                # Sheet 2: Bina Anomalileri
-                if len(df_bina_anom) > 0:
-                    df_bina_anom.to_excel(writer, sheet_name='Bina Anomalileri', index=False)
-                
-                # Sheet 3: Ani Düşüşler
-                if len(df_dusus) > 0:
-                    df_dusus.to_excel(writer, sheet_name='Ani Düşüşler', index=False)
-                
-                # Sheet 4: Sıfır Tüketim
-                if len(df_sifir) > 0:
-                    df_sifir.to_excel(writer, sheet_name='Sıfır Tüketim', index=False)
-                
-                # Sheet 5: Varyasyon
-                if len(df_var) > 0:
-                    df_var.to_excel(writer, sheet_name='Yüksek Varyasyon', index=False)
-                
-                writer.close()
+                output.seek(0)
                 
                 # Stil ekle
-                output.seek(0)
                 wb = openpyxl.load_workbook(output)
                 
-                # Ana rapor sayfası stil
-                ws = wb['Şüpheli Tesisatlar']
-                
-                # Başlık satırı stil
+                # Özet rapor stil
+                ws = wb['Özet Rapor']
                 header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
-                header_font = Font(color='FFFFFF', bold=True, size=11)
+                header_font = Font(color='FFFFFF', bold=True)
                 
                 for cell in ws[1]:
                     cell.fill = header_fill
                     cell.font = header_font
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.alignment = Alignment(horizontal='center')
                 
                 # Risk seviyesine göre renklendirme
                 red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
@@ -462,18 +672,18 @@ if uploaded_file is not None:
                 
                 if risk_col:
                     for row in range(2, ws.max_row + 1):
-                        risk_cell = ws.cell(row=row, column=risk_col)
-                        if risk_cell.value == 'YÜKSEK':
-                            for col in range(1, ws.max_column + 1):
-                                ws.cell(row=row, column=col).fill = red_fill
-                        elif risk_cell.value == 'ORTA':
-                            for col in range(1, ws.max_column + 1):
-                                ws.cell(row=row, column=col).fill = yellow_fill
-                        elif risk_cell.value == 'DÜŞÜK':
-                            for col in range(1, ws.max_column + 1):
-                                ws.cell(row=row, column=col).fill = green_fill
+                        risk_val = ws.cell(row=row, column=risk_col).value
+                        if risk_val == 'KRİTİK':
+                            fill = red_fill
+                        elif risk_val == 'ORTA':
+                            fill = yellow_fill
+                        else:
+                            fill = green_fill
+                        
+                        for col in range(1, 8):  # İlk 7 sütunu renklendir
+                            ws.cell(row=row, column=col).fill = fill
                 
-                # Sütun genişliklerini ayarla
+                # Sütun genişlikleri
                 for column in ws.columns:
                     max_length = 0
                     column_letter = column[0].column_letter
@@ -483,77 +693,75 @@ if uploaded_file is not None:
                                 max_length = len(str(cell.value))
                         except:
                             pass
-                    adjusted_width = min(max_length + 2, 50)
-                    ws.column_dimensions[column_letter].width = adjusted_width
+                    ws.column_dimensions[column_letter].width = min(max_length + 2, 20)
                 
-                # Diğer sayfalar için de stil ekle
-                for sheet_name in wb.sheetnames:
-                    if sheet_name != 'Şüpheli Tesisatlar':
-                        ws_other = wb[sheet_name]
-                        for cell in ws_other[1]:
-                            cell.fill = header_fill
-                            cell.font = header_font
-                            cell.alignment = Alignment(horizontal='center', vertical='center')
-                        
-                        for column in ws_other.columns:
-                            max_length = 0
-                            column_letter = column[0].column_letter
-                            for cell in column:
-                                try:
-                                    if len(str(cell.value)) > max_length:
-                                        max_length = len(str(cell.value))
-                                except:
-                                    pass
-                            adjusted_width = min(max_length + 2, 50)
-                            ws_other.column_dimensions[column_letter].width = adjusted_width
+                # Detaylı anomaliler sayfası stil
+                if 'Detaylı Anomaliler' in wb.sheetnames:
+                    ws2 = wb['Detaylı Anomaliler']
+                    for cell in ws2[1]:
+                        cell.fill = header_fill
+                        cell.font = header_font
+                        cell.alignment = Alignment(horizontal='center')
+                    
+                    for column in ws2.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        ws2.column_dimensions[column_letter].width = min(max_length + 2, 25)
                 
-                output = BytesIO()
-                wb.save(output)
-                output.seek(0)
+                output2 = BytesIO()
+                wb.save(output2)
+                output2.seek(0)
                 
-                return output.getvalue()
+                return output2.getvalue()
             
-            excel_data = create_excel_report(rapor_df, bina_anom, ani_dusus, sifir_tuketim, varyasyon)
+            excel_data = create_detailed_excel(results, df, ay_sutunlari)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="📊 Detaylı Excel Raporu İndir",
-                    data=excel_data,
-                    file_name="dogalgaz_kacak_detayli_rapor.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            
-            with col2:
-                # Basit CSV de sunalım
-                csv = rapor_df.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label="📄 CSV Raporu İndir",
-                    data=csv,
-                    file_name="dogalgaz_kacak_raporu.csv",
-                    mime="text/csv"
-                )
-            
+            st.download_button(
+                label="📊 Detaylı Excel Raporu İndir (Tüm Anomaliler)",
+                data=excel_data,
+                file_name=f"dogalgaz_anomali_raporu_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
         else:
             st.success("✅ Belirlenen kriterlere göre şüpheli tesisat bulunamadı!")
-            
+            st.info("Parametreleri gevşeterek daha fazla anomali tespit edebilirsiniz.")
+    
     except Exception as e:
         st.error(f"❌ Hata: {str(e)}")
-        st.info("Dosya formatını kontrol edin. İlk sütunlar 'tn' ve 'bn' olmalı, sonra ay kolonları gelmelidir.")
+        import traceback
+        st.code(traceback.format_exc())
+
 else:
-    st.info("👆 Lütfen yukarıdan CSV dosyanızı yükleyin.")
+    st.info("👆 Lütfen yukarıdan Excel dosyanızı yükleyin.")
     
     st.markdown("---")
-    st.markdown("### 📝 Dosya Formatı")
-    st.markdown("""
-    CSV dosyanız şu formatta olmalıdır:
-    - İlk sütun: **tn** (Tesisat numarası)
-    - İkinci sütun: **bn** (Bina numarası)
-    - Sonraki sütunlar: Ay verileri (2023/07, 2023/08, vb.)
     
-    Örnek:
-    ```
-    tn,bn,2023/07,2023/08,2023/09,...
-    10009832,100003724,18.4914,18.4316,8.18468,...
-    ```
-    """)
+    # Örnek veri göster
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📝 Beklenen Dosya Formatı")
+        st.markdown("""
+        | tn | bn | 2023/07 | 2023/08 | 2023/09 | ... |
+        |----|----|---------|---------|---------| --- |
+        | 10009832 | 100003724 | 18.49 | 18.43 | 8.18 | ... |
+        | 10009992 | 100003724 | 25.51 | 26.40 | 13.78 | ... |
+        """)
+    
+    with col2:
+        st.markdown("### 🎯 Tespit Edilen Anomali Tipleri")
+        st.markdown("""
+        1. **Bina Anomalisi**: Binadaki diğer dairelerden istatistiksel sapma
+        2. **Ani Düşüş**: Keskin tüketim düşüşleri
+        3. **Sıfır Tüketim**: Uzun süre sıfır kayıt
+        4. **Trend Değişimi**: Tüketim trendinde ani değişim
+        5. **ML Anomali**: Makine öğrenmesi tespiti
+        6. **İstatistiksel Aykırı**: Grubbs test ile tespit
+        """)
