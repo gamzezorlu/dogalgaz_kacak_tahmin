@@ -18,16 +18,16 @@ with st.sidebar:
     
     st.markdown("### 🎯 Ana Kriterler")
     
-    dusus_esigi = st.slider("Ani Düşüş Eşiği (%)", 40, 90, 65, 5,
+    dusus_esigi = st.slider("Ani Düşüş Eşiği (%)", 50, 95, 70, 5,
                             help="Bu %'den fazla düşüş kaçak şüphesi yaratır")
     
-    min_tuketim = st.number_input("Minimum Normal Tüketim", 5, 100, 15,
+    min_tuketim = st.number_input("Minimum Normal Tüketim", 5, 50, 10,
                                    help="Bu değerin altı çok düşük sayılır")
     
-    bina_fark_orani = st.slider("Bina Farkı Eşiği (%)", 30, 80, 50, 5,
+    bina_fark_orani = st.slider("Bina Farkı Eşiği (%)", 40, 90, 60, 5,
                                  help="Bina ortalamasından bu kadar az tüketim şüpheli")
     
-    ardisik_dusuk = st.slider("Ardışık Düşük Tüketim (Ay)", 2, 8, 3,
+    ardisik_dusuk = st.slider("Ardışık Düşük Tüketim (Ay)", 3, 10, 4,
                               help="Bu kadar ay üst üste düşük tüketim şüpheli")
     
     st.markdown("---")
@@ -35,19 +35,21 @@ with st.sidebar:
     st.markdown("""
     **1. Bina Karşılaştırma**
     - Aynı binadaki komşularla karşılaştır
-    - Normal ortalamadan %50+ az tüketim = ŞÜPHELİ
+    - Normal ortalamadan %60+ az tüketim
+    - En az 3 ay boyunca düşük olmalı
     
     **2. Ani Düşüş**
-    - Bir aydan diğerine %65+ düşüş = ŞÜPHELİ
-    - Özellikle yüksek tüketimden aniden düşük
+    - Bir aydan diğerine %70+ düşüş
+    - Yüksek tüketimden aniden düşük (>20 birimden)
     
     **3. Sürekli Düşük Tüketim**
-    - 3+ ay boyunca çok düşük tüketim = ŞÜPHELİ
+    - 4+ ay boyunca çok düşük tüketim (<10)
     - Sıfır veya minimum düzeyde
     
-    **4. Ters Patern**
-    - Herkes yükselirken düşüyor = ŞÜPHELİ
-    - Kış aylarında anormal düşük
+    **4. Çoklu Kriter Zorunlu**
+    - Sadece 1 kriter yeterli DEĞİL
+    - En az 2-3 kriter birlikte olmalı
+    - Özellikle bina anomalisi + başka kriter
     """)
 
 uploaded_file = st.file_uploader("📁 Excel Dosyası Yükleyin", type=['xlsx', 'xls'])
@@ -82,7 +84,7 @@ if uploaded_file:
                 bina_daire_sayisi = len(bina_df)
                 
                 # Yeterli daire yoksa atla
-                if bina_daire_sayisi < 2:
+                if bina_daire_sayisi < 3:
                     continue
                 
                 # Her ay için bina ortalaması
@@ -100,7 +102,7 @@ if uploaded_file:
                     tuketim = tuketimler[i]
                     
                     # Bina ortalaması yeterince yüksek ve bu tesisat çok düşükse
-                    if bina_ort > 20:
+                    if bina_ort > 25:  # Daha yüksek eşik
                         fark_orani = (bina_ort - tuketim) / bina_ort * 100
                         
                         if fark_orani > bina_fark_orani:
@@ -113,8 +115,8 @@ if uploaded_file:
                                 'fark': fark_orani
                             })
                 
-                if bina_dusuk_sayisi >= 3:
-                    suphe_puani += 50
+                if bina_dusuk_sayisi >= 4:  # Daha sıkı kriter
+                    suphe_puani += 60
                     sebepler.append(f"✗ Binadan {bina_dusuk_sayisi} ay boyunca %{bina_fark_orani}+ düşük")
                 
                 # 2. Ani Düşüş Kontrolü
@@ -123,7 +125,7 @@ if uploaded_file:
                     onceki = tuketimler[i-1]
                     simdiki = tuketimler[i]
                     
-                    if onceki > 20 and simdiki >= 0:
+                    if onceki > 30 and simdiki >= 0:  # Daha yüksek başlangıç
                         dusus = (onceki - simdiki) / onceki * 100
                         if dusus >= dusus_esigi:
                             ani_dususler.append({
@@ -176,8 +178,31 @@ if uploaded_file:
                             suphe_puani += 20
                             sebepler.append("✗ Ters mevsimsel patern (kış düşük)")
                 
-                # Şüpheliyse kaydet
-                if suphe_puani >= 50:
+                # DAHA SEÇICI: Birden fazla kriter gerekli
+                # Sadece puan yeterli değil, mantıklı kombinasyon olmalı
+                
+                kriter_sayisi = len([s for s in sebepler if s])
+                
+                # Kaçak olabilmesi için:
+                # 1. En az 2 farklı kriter + yüksek puan VEYA
+                # 2. Bina anomalisi + başka bir kriter + orta-yüksek puan
+                
+                gercek_supleli = False
+                
+                if suphe_puani >= 100 and kriter_sayisi >= 2:
+                    # Çok yüksek puan + en az 2 kriter = kesin şüpheli
+                    gercek_supleli = True
+                elif suphe_puani >= 80 and bina_dusuk_sayisi >= 4:
+                    # Binadan sürekli düşük = şüpheli
+                    gercek_supleli = True
+                elif len(ani_dususler) >= 2 and bina_dusuk_sayisi >= 2:
+                    # Hem ani düşüş hem bina anomalisi = şüpheli
+                    gercek_supleli = True
+                elif max_dusuk_seri >= 5 and s['ortalama_tuketim'] < 5:
+                    # Çok uzun süre çok düşük = şüpheli
+                    gercek_supleli = True
+                
+                if gercek_supleli:
                     
                     # Risk seviyesi
                     if suphe_puani >= 100:
