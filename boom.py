@@ -177,7 +177,7 @@ def validate_dataframe(df):
 
 @st.cache_data(show_spinner=False)
 def tespit_et_sayac_mudehalesi_bina_bazli(df, params):
-    """Ana tespit fonksiyonu - Tüm düzeltmelerle güncellenmiş versiyon"""
+    """Ana tespit fonksiyonu"""
     
     df = df.copy()
     df['tarih_dt'] = pd.to_datetime(df['tarih'])
@@ -430,8 +430,7 @@ def plot_bina_karsilastirma(df, tesisat_id, kirilma_tarihi):
                 y=t_data['tuketim'],
                 mode='lines+markers',
                 name=f'Tesisat {t} (ŞÜPHELİ)',
-                line=dict(color='red', width=3),
-                hovertemplate='<b>%{fullData.name}</b><br>Tarih: %{x}<br>Tüketim: %{y:.2f} m³<extra></extra>'
+                line=dict(color='red', width=3)
             ))
         else:
             fig1.add_trace(go.Scatter(
@@ -440,8 +439,7 @@ def plot_bina_karsilastirma(df, tesisat_id, kirilma_tarihi):
                 mode='lines+markers',
                 name=f'Tesisat {t}',
                 line=dict(width=1),
-                opacity=0.3,
-                hovertemplate='<b>%{fullData.name}</b><br>Tarih: %{x}<br>Tüketim: %{y:.2f} m³<extra></extra>'
+                opacity=0.3
             ))
     
     fig1.add_vline(x=kirilma_dt, line_dash="dash", line_color="black", 
@@ -451,8 +449,7 @@ def plot_bina_karsilastirma(df, tesisat_id, kirilma_tarihi):
         xaxis_title='Tarih',
         yaxis_title='Tüketim (m³)',
         hovermode='closest',
-        height=450,
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+        height=450
     )
     
     # Grafik 2: Şüpheli vs Bina Ortalaması
@@ -577,37 +574,41 @@ if uploaded_file is not None:
             st.stop()
         
         st.success(f"✅ {message}")
+    
+    except Exception as e:
+        st.error(f"❌ Dosya okuma hatası: {str(e)}")
+        st.stop()
+    
+    # Veri önizleme
+    with st.expander("🔍 Veri Önizleme", expanded=False):
+        st.dataframe(df.head(20), use_container_width=True)
         
-        # Veri önizleme
-        with st.expander("🔍 Veri Önizleme", expanded=False):
-            st.dataframe(df.head(20), use_container_width=True)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Toplam Kayıt", len(df))
-            col2.metric("Tesisat Sayısı", df['tesisat'].nunique())
-            col3.metric("Bina Sayısı", df['bina_numarasi'].nunique())
-            col4.metric("Tarih Aralığı", f"{df['tarih'].min()} - {df['tarih'].max()}")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Toplam Kayıt", len(df))
+        col2.metric("Tesisat Sayısı", df['tesisat'].nunique())
+        col3.metric("Bina Sayısı", df['bina_numarasi'].nunique())
+        col4.metric("Tarih Aralığı", f"{df['tarih'].min()} - {df['tarih'].max()}")
+    
+    st.markdown("---")
+    
+    # ============================================================================
+    # ANALİZ
+    # ============================================================================
+    
+    if st.button("🚀 Analizi Başlat", type="primary", use_container_width=True):
         
-        st.markdown("---")
+        params = {
+            'min_dusus': MIN_DUSUS_ORANI,
+            'max_dusus': MAX_DUSUS_ORANI,
+            'min_sureklilik': MIN_SUREKLILIK_AY,
+            'min_bina_daire': MIN_BINA_DAIRE_SAYISI,
+            'z_esik': BINA_SAPMA_ESIGI,
+            'sadece_ters_yonlu': SADECE_TERS_YONLU,
+            'min_onceki_tuketim': MIN_ONCEKI_TUKETIM
+        }
         
-        # ============================================================================
-        # ANALİZ
-        # ============================================================================
-        
-        if st.button("🚀 Analizi Başlat", type="primary", use_container_width=True):
-            
-            params = {
-                'min_dusus': MIN_DUSUS_ORANI,
-                'max_dusus': MAX_DUSUS_ORANI,
-                'min_sureklilik': MIN_SUREKLILIK_AY,
-                'min_bina_daire': MIN_BINA_DAIRE_SAYISI,
-                'z_esik': BINA_SAPMA_ESIGI,
-                'sadece_ters_yonlu': SADECE_TERS_YONLU,
-                'min_onceki_tuketim': MIN_ONCEKI_TUKETIM
-            }
-            
-            with st.spinner("🔍 Analiz yapılıyor..."):
-                supheliler_df = tespit_et_sayac_mudehalesi_bina_bazli(df, params)
+        with st.spinner("🔍 Analiz yapılıyor..."):
+            supheliler_df = tespit_et_sayac_mudehalesi_bina_bazli(df, params)
             
             if len(supheliler_df) == 0:
                 st.warning("⚠️ Belirlenen kriterlere göre şüpheli durum tespit edilemedi.")
