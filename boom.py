@@ -849,6 +849,7 @@ if uploaded_file is not None:
                         mime="text/csv",
                         use_container_width=True
                     )
+
 else:
     st.info("👆 Lütfen analiz için bir veri dosyası yükleyin.")
     
