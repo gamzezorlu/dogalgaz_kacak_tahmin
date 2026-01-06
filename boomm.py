@@ -573,3 +573,315 @@ if uploaded_file is not None:
         if not valid:
             st.error(f"❌ Veri hatası: {message}")
             st.stop()
+st.success(f"✅ {message}")
+    
+    except Exception as e:
+        st.error(f"❌ Dosya okuma hatası: {str(e)}")
+        st.stop()
+    
+    # Veri önizleme
+    with st.expander("🔍 Veri Önizleme", expanded=False):
+        st.dataframe(df.head(20), use_container_width=True)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Toplam Kayıt", len(df))
+        col2.metric("Tesisat Sayısı", df['tesisat'].nunique())
+        col3.metric("Bina Sayısı", df['bina_numarasi'].nunique())
+        col4.metric("Tarih Aralığı", f"{df['tarih'].min()} - {df['tarih'].max()}")
+    
+    st.markdown("---")
+    
+    # ============================================================================
+    # ANALİZ
+    # ============================================================================
+    
+    if st.button("🚀 Analizi Başlat", type="primary", use_container_width=True):
+        
+        params = {
+            'min_dusus': MIN_DUSUS_ORANI,
+            'max_dusus': MAX_DUSUS_ORANI,
+            'min_sureklilik': MIN_SUREKLILIK_AY,
+            'min_bina_daire': MIN_BINA_DAIRE_SAYISI,
+            'z_esik': BINA_SAPMA_ESIGI,
+            'sadece_ters_yonlu': SADECE_TERS_YONLU,
+            'min_onceki_tuketim': MIN_ONCEKI_TUKETIM
+        }
+        
+        with st.spinner("🔍 Analiz yapılıyor..."):
+            supheliler_df = tespit_et_sayac_mudehalesi_bina_bazli(df, params)
+            
+            if len(supheliler_df) == 0:
+                st.warning("⚠️ Belirlenen kriterlere göre şüpheli durum tespit edilemedi.")
+                st.info("💡 Parametreleri gevşeterek tekrar deneyebilirsiniz.")
+            else:
+                st.success(f"✅ **{len(supheliler_df)} adet şüpheli tesisat tespit edildi!**")
+                
+                # ============================================================================
+                # ÖZET İSTATİSTİKLER
+                # ============================================================================
+                
+                st.header("📊 Özet İstatistikler")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric(
+                        "Toplam Şüpheli",
+                        len(supheliler_df),
+                        delta=f"{len(supheliler_df)/df['tesisat'].nunique()*100:.1f}%",
+                        delta_color="inverse"
+                    )
+                
+                with col2:
+                    yuksek_risk = len(supheliler_df[supheliler_df['suphe_skoru'] >= 70])
+                    st.metric(
+                        "Yüksek Risk (≥70)",
+                        yuksek_risk,
+                        delta=f"{yuksek_risk/len(supheliler_df)*100:.0f}%" if len(supheliler_df) > 0 else "0%"
+                    )
+                
+                with col3:
+                    ters_yonlu_sayisi = len(supheliler_df[supheliler_df['ters_yonlu'] == 'EVET'])
+                    st.metric(
+                        "Ters Yönlü Hareket",
+                        ters_yonlu_sayisi,
+                        delta=f"{ters_yonlu_sayisi/len(supheliler_df)*100:.0f}%" if len(supheliler_df) > 0 else "0%"
+                    )
+                
+                with col4:
+                    toplam_tasarruf = supheliler_df['yillik_tasarruf_tahmini'].sum()
+                    st.metric(
+                        "Toplam Tahmini Tasarruf",
+                        f"{toplam_tasarruf:,.0f} m³",
+                        delta="Yıllık"
+                    )
+                
+                st.markdown("---")
+                
+                # ============================================================================
+                # ÖZET GRAFİKLER
+                # ============================================================================
+                
+                st.header("📈 Genel Analizler")
+                
+                fig1, fig2, fig3 = create_summary_charts(supheliler_df)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.plotly_chart(fig1, use_container_width=True)
+                with col2:
+                    st.plotly_chart(fig2, use_container_width=True)
+                
+                st.plotly_chart(fig3, use_container_width=True)
+                
+                st.markdown("---")
+                
+                # ============================================================================
+                # DETAYLI SONUÇLAR
+                # ============================================================================
+                
+                st.header("🔍 Detaylı Sonuçlar")
+                
+                # Risk seviyesi filtreleme
+                risk_filter = st.selectbox(
+                    "Risk Seviyesi Filtresi",
+                    ["Tümü", "Yüksek Risk (≥70)", "Orta Risk (50-70)", "Düşük Risk (<50)"]
+                )
+                
+                filtered_df = supheliler_df.copy()
+                if risk_filter == "Yüksek Risk (≥70)":
+                    filtered_df = filtered_df[filtered_df['suphe_skoru'] >= 70]
+                elif risk_filter == "Orta Risk (50-70)":
+                    filtered_df = filtered_df[(filtered_df['suphe_skoru'] >= 50) & (filtered_df['suphe_skoru'] < 70)]
+                elif risk_filter == "Düşük Risk (<50)":
+                    filtered_df = filtered_df[filtered_df['suphe_skoru'] < 50]
+                
+                # Renklendirme fonksiyonu
+                def color_risk(val):
+                    if val >= 70:
+                        return 'background-color: #ff4b4b; color: white; font-weight: bold'
+                    elif val >= 50:
+                        return 'background-color: #ffa500; color: white'
+                    else:
+                        return 'background-color: #90ee90'
+                
+                # Tablo gösterimi
+                display_df = filtered_df[[
+                    'tesisat', 'bina_numarasi', 'suphe_skoru', 'kirilma_tarihi',
+                    'genel_dusus_orani', 'kis_dusus', 'yaz_dusus', 'z_kayma',
+                    'ters_yonlu', 'yillik_tasarruf_tahmini'
+                ]].copy()
+                
+                display_df.columns = [
+                    'Tesisat', 'Bina', 'Şüphe Skoru', 'Kırılma Tarihi',
+                    'Düşüş (%)', 'Kış Düşüş (%)', 'Yaz Düşüş (%)', 'Z-Kayma',
+                    'Ters Yönlü', 'Yıllık Tasarruf (m³)'
+                ]
+                
+                st.dataframe(
+                    display_df.style.applymap(color_risk, subset=['Şüphe Skoru']),
+                    use_container_width=True,
+                    height=400
+                )
+                
+                # ============================================================================
+                # TEK TEK GRAFİKLER
+                # ============================================================================
+                
+                st.markdown("---")
+                st.header("🔬 Tesisat Bazlı Detaylı Analiz")
+                
+                selected_tesisat = st.selectbox(
+                    "İncelemek istediğiniz tesisatı seçin:",
+                    filtered_df['tesisat'].tolist(),
+                    format_func=lambda x: f"Tesisat {x} (Şüphe: {filtered_df[filtered_df['tesisat']==x]['suphe_skoru'].iloc[0]})"
+                )
+                
+                if selected_tesisat:
+                    tesisat_row = filtered_df[filtered_df['tesisat'] == selected_tesisat].iloc[0]
+                    
+                    # Bilgi kartları
+                    st.subheader(f"📋 Tesisat {selected_tesisat} - Detay Bilgiler")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Bina Numarası", tesisat_row['bina_numarasi'])
+                        st.metric("Kırılma Tarihi", tesisat_row['kirilma_tarihi'])
+                    
+                    with col2:
+                        st.metric("Şüphe Skoru", f"{tesisat_row['suphe_skoru']:.1f}")
+                        st.metric("Genel Düşüş", f"{tesisat_row['genel_dusus_orani']:.1f}%")
+                    
+                    with col3:
+                        st.metric("Kış Düşüş", f"{tesisat_row['kis_dusus']:.1f}%")
+                        st.metric("Yaz Düşüş", f"{tesisat_row['yaz_dusus']:.1f}%")
+                    
+                    with col4:
+                        st.metric("Z-Score Kayma", f"{tesisat_row['z_kayma']:.2f}")
+                        st.metric("Ters Yönlü", tesisat_row['ters_yonlu'])
+                    
+                    # Grafikler
+                    fig1, fig2 = plot_bina_karsilastirma(
+                        df, 
+                        selected_tesisat, 
+                        tesisat_row['kirilma_tarihi']
+                    )
+                    
+                    if fig1 and fig2:
+                        st.plotly_chart(fig1, use_container_width=True)
+                        st.plotly_chart(fig2, use_container_width=True)
+                    
+                    # Ek bilgiler
+                    with st.expander("📊 Ek Detaylar"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**Tüketim Bilgileri:**")
+                            st.write(f"- Önceki Ort. Tüketim: {tesisat_row['onceki_ort_tuketim']:.2f} m³")
+                            st.write(f"- Sonraki Ort. Tüketim: {tesisat_row['sonraki_ort_tuketim']:.2f} m³")
+                            st.write(f"- Yıllık Tasarruf: {tesisat_row['yillik_tasarruf_tahmini']:.2f} m³")
+                        
+                        with col2:
+                            st.write("**Z-Score Analizi:**")
+                            st.write(f"- Önceki Z-Score: {tesisat_row['onceki_z_score']:.2f}")
+                            st.write(f"- Sonraki Z-Score: {tesisat_row['sonraki_z_score']:.2f}")
+                            st.write(f"- Bina Trend: {tesisat_row['bina_trend']:.1f}%")
+                            st.write(f"- Sürekli Düşük Ay: {tesisat_row['surekli_dusuk_ay_sayisi']}")
+                
+                # ============================================================================
+                # EXCEL EXPORT
+                # ============================================================================
+                
+                st.markdown("---")
+                st.header("💾 Rapor İndirme")
+                
+                # Excel'e yazma
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    supheliler_df.to_excel(writer, sheet_name='Tüm Sonuçlar', index=False)
+                    
+                    if len(supheliler_df[supheliler_df['suphe_skoru'] >= 70]) > 0:
+                        supheliler_df[supheliler_df['suphe_skoru'] >= 70].to_excel(
+                            writer, sheet_name='Yüksek Risk', index=False
+                        )
+                    
+                    # Özet istatistikler
+                    summary = pd.DataFrame({
+                        'Metrik': [
+                            'Toplam Şüpheli',
+                            'Yüksek Risk (≥70)',
+                            'Orta Risk (50-70)',
+                            'Düşük Risk (<50)',
+                            'Ters Yönlü Hareket',
+                            'Toplam Tahmini Tasarruf (m³/yıl)'
+                        ],
+                        'Değer': [
+                            len(supheliler_df),
+                            len(supheliler_df[supheliler_df['suphe_skoru'] >= 70]),
+                            len(supheliler_df[(supheliler_df['suphe_skoru'] >= 50) & (supheliler_df['suphe_skoru'] < 70)]),
+                            len(supheliler_df[supheliler_df['suphe_skoru'] < 50]),
+                            len(supheliler_df[supheliler_df['ters_yonlu'] == 'EVET']),
+                            round(supheliler_df['yillik_tasarruf_tahmini'].sum(), 2)
+                        ]
+                    })
+                    summary.to_excel(writer, sheet_name='Özet', index=False)
+                
+                excel_data = output.getvalue()
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.download_button(
+                        label="📥 Detaylı Rapor İndir (Excel)",
+                        data=excel_data,
+                        file_name=f"sayac_mudahale_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    csv_data = supheliler_df.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(
+                        label="📥 Sonuçları İndir (CSV)",
+                        data=csv_data,
+                        file_name=f"sayac_mudahale_sonuclar_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+
+else:
+    st.info("👆 Lütfen analiz için bir veri dosyası yükleyin.")
+    
+    st.markdown("### 📋 Veri Formatı")
+    st.markdown("""
+    Yüklediğiniz dosya şu kolonları içermelidir:
+    
+    | Kolon | Açıklama | Örnek |
+    |-------|----------|-------|
+    | `tarih` | Tüketim tarihi (YYYY-MM formatında) | 2023-01 |
+    | `tesisat` | Tesisat numarası | 12345 |
+    | `bina_numarasi` | Bina numarası | 100 |
+    | `tuketim` | Tüketim miktarı (m³) | 150.5 |
+    """)
+    
+    # Örnek veri göster
+    st.markdown("### 📊 Örnek Veri")
+    example_data = pd.DataFrame({
+        'tarih': ['2023-01', '2023-02', '2023-03', '2023-04'],
+        'tesisat': [12345, 12345, 12345, 12345],
+        'bina_numarasi': [100, 100, 100, 100],
+        'tuketim': [150.5, 145.2, 140.8, 135.3]
+    })
+    st.dataframe(example_data, use_container_width=True)
+
+# ============================================================================
+# FOOTER
+# ============================================================================
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; padding: 20px;'>
+    <p><strong>Doğalgaz Sayaç Müdahale Tespit Sistemi v1.0</strong></p>
+    <p>Geliştirilme Tarihi: 2025 | Powered by Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
