@@ -146,7 +146,7 @@ st.markdown("---")
 # Sidebar
 with st.sidebar:
     st.header("📊 Veri Yükleme")
-    uploaded_file = st.file_uploader("CSV dosyanızı yükleyin", type=['csv'])
+    uploaded_file = st.file_uploader("Excel dosyanızı yükleyin", type=['xlsx', 'xls'])
     
     st.markdown("---")
     st.markdown("### 📋 Gerekli Kolonlar:")
@@ -161,7 +161,7 @@ with st.sidebar:
 if uploaded_file is not None:
     try:
         # Veriyi yükle
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_excel(uploaded_file)
         df['tarih'] = pd.to_datetime(df['tarih'])
         
         st.success(f"✅ Veri başarıyla yüklendi! Toplam {len(df)} kayıt")
@@ -257,13 +257,18 @@ if uploaded_file is not None:
             
             st.dataframe(display_df, use_container_width=True, height=400)
             
-            # İndirme butonu
-            csv = filtered_df.to_csv(index=False).encode('utf-8')
+            # İndirme butonu - Excel formatında
+            from io import BytesIO
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                filtered_df.to_excel(writer, index=False, sheet_name='Analiz Sonuçları')
+            buffer.seek(0)
+            
             st.download_button(
-                label="📥 Sonuçları İndir (CSV)",
-                data=csv,
-                file_name=f"manipulasyon_analizi_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
+                label="📥 Sonuçları İndir (Excel)",
+                data=buffer,
+                file_name=f"manipulasyon_analizi_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
             # Detaylı tesisat analizi
@@ -306,21 +311,21 @@ if uploaded_file is not None:
 
 else:
     # Başlangıç ekranı
-    st.info("👈 Lütfen soldaki menüden CSV dosyanızı yükleyin")
+    st.info("👈 Lütfen soldaki menüden Excel dosyanızı yükleyin")
     
     st.markdown("### 📖 Kullanım Talimatları:")
     st.markdown("""
-    1. **Veri Hazırlığı**: CSV dosyanız şu kolonları içermeli:
+    1. **Veri Hazırlığı**: Excel dosyanız şu kolonları içermeli:
        - `tesisat_no`: Tesisat numarası
        - `bina_no`: Bina numarası
        - `tarih`: Tarih (YYYY-MM-DD formatında)
        - `tuketim`: Tüketim değeri (m³)
     
-    2. **Yükleme**: Sol menüden "Browse files" butonuna tıklayıp CSV dosyanızı seçin
+    2. **Yükleme**: Sol menüden "Browse files" butonuna tıklayıp Excel dosyanızı seçin
     
     3. **Analiz**: "Manipülasyon Analizi Başlat" butonuna tıklayın
     
-    4. **Sonuçlar**: Risk seviyelerine göre filtreleme yapabilir ve detaylı analiz görebilirsiniz
+    4. **Sonuçlar**: Risk seviyelerine göre filtreleme yapabilir ve Excel olarak indirebilirsiniz
     """)
     
     # Örnek veri formatı
