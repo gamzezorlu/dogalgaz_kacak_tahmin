@@ -6,211 +6,211 @@ import plotly.graph_objects as go
 import plotly.express as px
 from scipy import stats
 from scipy.signal import find_peaks
+from sklearn.ensemble import IsolationForest
 import warnings
 warnings.filterwarnings('ignore')
 
-class GazSayacAnalizGelistirilmis:
+class GazSayacHibritAnaliz:
+    """Hibrit Manipülasyon Tespit Sistemi"""
+    
     def __init__(self):
         self.season_months = {
             'kış': [11, 12, 1, 2, 3],
             'yaz': [6, 7, 8, 9],
             'geçiş': [4, 5, 10]
         }
+        
+        self.weights = {
+            'rekor_orani': 25,
+            'dusus_hizi': 30,
+            'mevsimsel_uyumsuzluk': 15,
+            'trend_degisimi': 15,
+            'varyans_degisimi': 10,
+            'ml_anomali': 5
+        }
     
-    def detect_manipulation_advanced(self, df, tesisat_no):
-        """
-        Geliştirilmiş manipülasyon tespiti
-        - Rekorun ilk aylarda olması durumunu da yakalar
-        - Çoklu rekor analizi yapar
-        """
+    def detect_manipulation_hybrid(self, df, tesisat_no):
+        """Hibrit manipülasyon tespiti"""
         try:
             tesisat_df = df[df['tesisat_no'] == tesisat_no].copy()
             
-            if len(tesisat_df) < 12:  # Minimum 1 yıl veri
+            if len(tesisat_df) < 12:
                 return None
-                
-            tesisat_df = tesisat_df.sort_values('tarih')
             
-            # YIL-AY formatında sütun ekle
-            tesisat_df['yil_ay'] = tesisat_df['tarih'].dt.to_period('M')
+            tesisat_df = tesisat_df.sort_values('tarih').reset_index(drop=True)
+            candidate_points = self._find_manipulation_candidates(tesisat_df)
             
-            # 1. Tüm yüksek değerleri bul (peak detection)
-            tuketim_array = tesisat_df['tuketim'].values
+            if not candidate_points:
+                return None
             
-            # Peak'leri bul (threshold = ortalamanın 1.5 katı)
-            mean_consumption = np.mean(tuketim_array)
-            threshold = mean_consumption * 1.5
+            results = []
+            for point_idx, point_value in candidate_points:
+                point_date = tesisat_df.iloc[point_idx]['tarih']
+                result = self._analyze_manipulation_point(
+                    tesisat_df, point_idx, point_date, point_value, tesisat_no
+                )
+                if result:
+                    results.append(result)
             
-            peaks, _ = find_peaks(tuketim_array, height=threshold)
-            
-            if len(peaks) == 0:
-                # Hiç peak yoksa, en yüksek değeri al
-                peaks = [tesisat_df['tuketim'].idxmax()]
-            
-            results_list = []
-            
-            # Her bir peak için analiz yap
-            for peak_idx in peaks:
-                max_date = tesisat_df.iloc[peak_idx]['tarih']
-                max_value = tesisat_df.iloc[peak_idx]['tuketim']
-                
-                # Bu peak'in anormal olup olmadığını kontrol et
-                if self._is_abnormal_peak(tesisat_df, peak_idx):
-                    # Analiz yap
-                    result = self._analyze_period(tesisat_df, max_date, max_value, tesisat_no)
-                    if result:
-                        results_list.append(result)
-            
-            # En şüpheli sonucu döndür
-            if results_list:
-                # En yüksek şüphe puanlı olanı seç
-                return max(results_list, key=lambda x: x['süphe_puani'])
+            if results:
+                return max(results, key=lambda x: x['süphe_puani'])
             
             return None
             
         except Exception as e:
-            print(f"Hata {tesisat_no}: {str(e)}")
             return None
     
-    def _is_abnormal_peak(self, df, peak_idx):
-        """Bir peak'in anormal olup olmadığını kontrol et"""
-        if peak_idx == 0 or peak_idx == len(df) - 1:
-            return False  # İlk veya son ay ise atla
+    def _find_manipulation_candidates(self, df):
+        """Potansiyel manipülasyon noktalarını tespit et"""
+        candidates = []
+        tuketim = df['tuketim'].values
         
-        peak_value = df.iloc[peak_idx]['tuketim']
+        if len(tuketim) < 12:
+            return candidates
         
-        # Önceki 6 ayın ortalaması
-        start_idx = max(0, peak_idx - 6)
-        before_avg = df.iloc[start_idx:peak_idx]['tuketim'].mean()
+        max_idx = np.argmax(tuketim)
+        max_val = tuketim[max_idx]
+        candidates.append((max_idx, max_val))
         
-        # Sonraki 6 ayın ortalaması
-        end_idx = min(len(df), peak_idx + 7)
-        after_avg = df.iloc[peak_idx+1:end_idx]['tuketim'].mean()
+        mean = np.mean(tuketim)
+        std = np.std(tuketim)
+        threshold = mean + 1.5 * std
         
-        # Peak, ortalamanın en az 2 katı mı?
-        if before_avg > 0:
-            peak_ratio = peak_value / before_avg
-            return peak_ratio > 2.0 and after_avg < (before_avg * 0.7)
+        peaks, _ = find_peaks(tuketim, height=threshold, distance=3)
+        for peak_idx in peaks:
+            if peak_idx != max_idx:
+                candidates.append((peak_idx, tuketim[peak_idx]))
         
-        return False
+        window = min(6, len(tuketim) // 3)
+        rolling_mean = pd.Series(tuketim).rolling(window=window, center=True).mean()
+        
+        for i in range(window, len(tuketim) - window):
+            if pd.notna(rolling_mean.iloc[i]):
+                deviation_ratio = tuketim[i] / rolling_mean.iloc[i]
+                if deviation_ratio > 2.0 and tuketim[i] > threshold:
+                    if i not in [c[0] for c in candidates]:
+                        candidates.append((i, tuketim[i]))
+        
+        return candidates
     
-    def _analyze_period(self, df, max_date, max_value, tesisat_no):
-        """Belirli bir rekor tarihi için analiz yap"""
+    def _analyze_manipulation_point(self, df, point_idx, point_date, point_value, tesisat_no):
+        """Belirli bir nokta için detaylı analiz"""
         try:
-            # 1. Dönemleri belirle
-            before_period = df[df['tarih'] < max_date]
-            after_period = df[df['tarih'] > max_date]
+            if point_idx < 3 or point_idx >= len(df) - 3:
+                return None
             
-            # Minimum veri kontrolü - ESNEK
-            min_data_needed = 3
+            before_period = df.iloc[:point_idx]
+            after_period = df.iloc[point_idx+1:]
             
-            # Eğer rekor ilk aylarda ise farklı yaklaşım
-            if len(before_period) < min_data_needed:
-                # Rekor ilk aylarda, tüm veriyi sonraki dönem olarak kabul et
-                # İlk 6 ayı "başlangıç" olarak al
-                if len(df) >= 12:
-                    # İlk 6 ayı al (rekor dahil)
-                    first_half = df.head(6)
-                    # Geri kalanı ikinci yarı
-                    second_half = df.tail(len(df) - 6)
-                    
-                    before_avg = first_half['tuketim'].mean()
-                    after_avg = second_half['tuketim'].mean()
-                    
-                    # Mevsimsel düzeltme yap
-                    before_seasonal = self._seasonal_adjustment(first_half)
-                    after_seasonal = self._seasonal_adjustment(second_half)
-                    
-                    # Sonuçları hazırla
-                    results = {
-                        'tesisat_no': tesisat_no,
-                        'rekor_tarihi': max_date,
-                        'rekor_degeri': max_value,
-                        'bina_no': df['bina_no'].iloc[0] if 'bina_no' in df.columns else 'Belirsiz',
-                        'süphe_puani': 0,
-                        'manipulasyon_olasiligi': 'DÜŞÜK',
-                        'ortalama_oncesi': before_avg,
-                        'ortalama_sonrasi': after_avg,
-                        'degisim_yuzdesi': 0,
-                        'analiz_edilen_aylar': len(df),
-                        'not': 'REKOR_ILK_AYLARDA'
-                    }
-                else:
-                    return None
+            if len(before_period) < 3 or len(after_period) < 3:
+                return None
+            
+            results = {
+                'tesisat_no': tesisat_no,
+                'rekor_tarihi': point_date,
+                'rekor_degeri': point_value,
+                'bina_no': df['bina_no'].iloc[0] if 'bina_no' in df.columns else 'N/A',
+                'süphe_puani': 0,
+                'manipulasyon_olasiligi': 'DÜŞÜK',
+                'analiz_detaylari': {}
+            }
+            
+            suspicion_score = 0
+            before_mean = before_period['tuketim'].mean()
+            after_mean = after_period['tuketim'].mean()
+            
+            # KRİTER 1: REKOR ORANI
+            if before_mean > 0:
+                rekor_orani = point_value / before_mean
+                if rekor_orani >= 3.0:
+                    suspicion_score += self.weights['rekor_orani']
+                elif rekor_orani >= 2.5:
+                    suspicion_score += self.weights['rekor_orani'] * 0.8
+                elif rekor_orani >= 2.0:
+                    suspicion_score += self.weights['rekor_orani'] * 0.5
+                results['analiz_detaylari']['rekor_orani'] = round(rekor_orani, 2)
+            
+            # KRİTER 2: DÜŞÜŞ HIZI
+            if before_mean > 0:
+                dusus_orani = ((after_mean - before_mean) / before_mean) * 100
+                first_3_after = after_period.head(3)['tuketim'].mean()
+                ilk_dusus = ((first_3_after - before_mean) / before_mean) * 100
+                
+                if ilk_dusus < -60:
+                    suspicion_score += self.weights['dusus_hizi']
+                elif ilk_dusus < -50:
+                    suspicion_score += self.weights['dusus_hizi'] * 0.8
+                elif ilk_dusus < -40:
+                    suspicion_score += self.weights['dusus_hizi'] * 0.6
+                elif ilk_dusus < -30:
+                    suspicion_score += self.weights['dusus_hizi'] * 0.4
+                
+                results['analiz_detaylari']['dusus_orani'] = round(dusus_orani, 1)
+                results['analiz_detaylari']['ilk_3_ay_dusus'] = round(ilk_dusus, 1)
+            
+            # KRİTER 3: MEVSİMSEL UYUMSUZLUK
+            seasonal_score = self._check_seasonal_mismatch(before_period, after_period)
+            suspicion_score += seasonal_score * self.weights['mevsimsel_uyumsuzluk'] / 100
+            results['analiz_detaylari']['mevsimsel_uyumsuzluk'] = round(seasonal_score, 1)
+            
+            # KRİTER 4: TREND DEĞİŞİMİ
+            trend_change = self._analyze_trend_change(before_period, after_period)
+            if trend_change:
+                suspicion_score += self.weights['trend_degisimi']
+                results['analiz_detaylari']['trend_degisimi'] = 'VAR'
             else:
-                # Normal analiz
-                if len(before_period) < min_data_needed or len(after_period) < min_data_needed:
-                    return None
-                
-                before_avg = before_period['tuketim'].mean()
-                after_avg = after_period['tuketim'].mean()
-                
+                results['analiz_detaylari']['trend_degisimi'] = 'YOK'
+            
+            # KRİTER 5: VARYANS DEĞİŞİMİ
+            before_std = before_period['tuketim'].std()
+            after_std = after_period['tuketim'].std()
+            
+            if before_std > 0:
+                varyans_degisimi = ((after_std - before_std) / before_std) * 100
+                if varyans_degisimi < -40:
+                    suspicion_score += self.weights['varyans_degisimi']
+                elif varyans_degisimi < -30:
+                    suspicion_score += self.weights['varyans_degisimi'] * 0.7
+                results['analiz_detaylari']['varyans_degisimi'] = round(varyans_degisimi, 1)
+            
+            # KRİTER 6: ML ANOMALİ
+            ml_score = self._ml_anomaly_detection(df, point_idx)
+            if ml_score > 0.7:
+                suspicion_score += self.weights['ml_anomali']
+            elif ml_score > 0.5:
+                suspicion_score += self.weights['ml_anomali'] * 0.6
+            results['analiz_detaylari']['ml_anomali_skoru'] = round(ml_score, 2)
+            
+            # İSTATİSTİKSEL TEST
+            if len(before_period) > 1 and len(after_period) > 1:
                 before_seasonal = self._seasonal_adjustment(before_period)
                 after_seasonal = self._seasonal_adjustment(after_period)
                 
-                results = {
-                    'tesisat_no': tesisat_no,
-                    'rekor_tarihi': max_date,
-                    'rekor_degeri': max_value,
-                    'bina_no': df['bina_no'].iloc[0] if 'bina_no' in df.columns else 'Belirsiz',
-                    'süphe_puani': 0,
-                    'manipulasyon_olasiligi': 'DÜŞÜK',
-                    'ortalama_oncesi': before_avg,
-                    'ortalama_sonrasi': after_avg,
-                    'degisim_yuzdesi': 0,
-                    'analiz_edilen_aylar': len(df),
-                    'not': 'NORMAL_ANALIZ'
-                }
+                try:
+                    t_stat, p_value = stats.ttest_ind(before_seasonal, after_seasonal)
+                    results['analiz_detaylari']['p_value'] = round(p_value, 4)
+                    if p_value < 0.01 and dusus_orani < -20:
+                        suspicion_score += 5
+                except:
+                    pass
             
-            # 2. Şüphe puanı hesapla
-            suspicion_score = 0
+            # SÜREKLİ DÜŞÜŞ
+            if self._check_continuous_decline(after_period):
+                suspicion_score += 5
+                results['analiz_detaylari']['surekli_dusus'] = 'VAR'
+            else:
+                results['analiz_detaylari']['surekli_dusus'] = 'YOK'
             
-            # Değişim oranı
-            if results.get('ortalama_oncesi', 0) > 0:
-                change_pct = ((results['ortalama_sonrasi'] - results['ortalama_oncesi']) / results['ortalama_oncesi']) * 100
-                results['degisim_yuzdesi'] = change_pct
-                
-                if change_pct < -30:
-                    suspicion_score += 30
-                elif change_pct < -20:
-                    suspicion_score += 20
-                elif change_pct < -10:
-                    suspicion_score += 10
+            results['süphe_puani'] = min(100, round(suspicion_score))
             
-            # İstatistiksel test
-            if 'before_seasonal' in locals() and 'after_seasonal' in locals():
-                if len(before_seasonal) > 1 and len(after_seasonal) > 1:
-                    try:
-                        t_stat, p_value = stats.ttest_ind(before_seasonal, after_seasonal)
-                        if p_value < 0.05:
-                            suspicion_score += 20
-                        if p_value < 0.01:
-                            suspicion_score += 10
-                    except:
-                        pass
-            
-            # Mevsimsel sapma
-            if len(after_period) >= 3 and len(before_period) >= 3:
-                seasonal_dev = self._check_seasonal_deviation_advanced(after_period, before_period)
-                if seasonal_dev > 40:
-                    suspicion_score += 15
-            
-            # Trend değişimi
-            if len(after_period) >= 3 and len(before_period) >= 3:
-                if self._check_trend_change(before_period, after_period):
-                    suspicion_score += 15
-            
-            # Ani düşüş
-            if self._check_sudden_drop_advanced(df, max_date):
-                suspicion_score += 10
-            
-            # Toplam puan
-            results['süphe_puani'] = suspicion_score
-            
-            if suspicion_score >= 40:
+            if results['süphe_puani'] >= 60:
                 results['manipulasyon_olasiligi'] = 'YÜKSEK'
-            elif suspicion_score >= 20:
+            elif results['süphe_puani'] >= 35:
                 results['manipulasyon_olasiligi'] = 'ORTA'
+            
+            results['ortalama_oncesi'] = round(before_mean, 1)
+            results['ortalama_sonrasi'] = round(after_mean, 1)
+            results['analiz_edilen_aylar'] = len(df)
             
             return results
             
@@ -218,13 +218,11 @@ class GazSayacAnalizGelistirilmis:
             return None
     
     def _seasonal_adjustment(self, df):
-        """Mevsimsel düzeltme"""
         adjusted = []
         for _, row in df.iterrows():
             month = row['tarih'].month
             season = self._get_season(month)
-            # Daha gerçekçi faktörler
-            seasonal_factors = {'kış': 1.3, 'yaz': 0.6, 'geçiş': 0.9}
+            seasonal_factors = {'kış': 1.4, 'yaz': 0.6, 'geçiş': 0.95}
             adjusted.append(row['tuketim'] / seasonal_factors[season])
         return np.array(adjusted)
     
@@ -234,141 +232,124 @@ class GazSayacAnalizGelistirilmis:
                 return season
         return 'geçiş'
     
-    def _check_seasonal_deviation_advanced(self, after_df, before_df):
-        """Gelişmiş mevsimsel sapma kontrolü"""
-        if len(after_df) < 3 or len(before_df) < 3:
-            return 0
-        
+    def _check_seasonal_mismatch(self, before_df, after_df):
         try:
-            # Aylık ortalamaları hesapla
             before_monthly = before_df.groupby(before_df['tarih'].dt.month)['tuketim'].mean()
             after_monthly = after_df.groupby(after_df['tarih'].dt.month)['tuketim'].mean()
+            common_months = set(before_monthly.index) & set(after_monthly.index)
+            
+            if len(common_months) < 3:
+                return 0
             
             deviations = []
-            for month in before_monthly.index:
-                if month in after_monthly.index:
-                    before_val = before_monthly[month]
-                    after_val = after_monthly[month]
-                    if before_val > 0:
-                        deviation = ((after_val - before_val) / before_val) * 100
+            for month in common_months:
+                before_val = before_monthly[month]
+                after_val = after_monthly[month]
+                if before_val > 0:
+                    deviation = ((before_val - after_val) / before_val) * 100
+                    if deviation > 0:
                         deviations.append(deviation)
             
-            if deviations:
-                # Ortalama negatif sapma
-                negative_deviations = [d for d in deviations if d < -20]
-                if negative_deviations:
-                    return abs(np.mean(negative_deviations))
+            return np.mean(deviations) if deviations else 0
+        except:
+            return 0
+    
+    def _analyze_trend_change(self, before_df, after_df):
+        try:
+            if len(before_df) < 3 or len(after_df) < 3:
+                return False
+            
+            x_before = np.arange(len(before_df))
+            y_before = before_df['tuketim'].values
+            slope_before = np.polyfit(x_before, y_before, 1)[0]
+            
+            x_after = np.arange(len(after_df))
+            y_after = after_df['tuketim'].values
+            slope_after = np.polyfit(x_after, y_after, 1)[0]
+            
+            return slope_before >= -0.5 and slope_after < -2.0
+        except:
+            return False
+    
+    def _check_continuous_decline(self, df):
+        if len(df) < 4:
+            return False
+        try:
+            first_months = df.head(min(6, len(df)))
+            values = first_months['tuketim'].values
+            decreasing_count = sum(1 for i in range(1, len(values)) if values[i] < values[i-1])
+            return decreasing_count / (len(values) - 1) >= 0.7
+        except:
+            return False
+    
+    def _ml_anomaly_detection(self, df, point_idx):
+        try:
+            if len(df) < 12:
+                return 0
+            
+            features = []
+            for i in range(len(df)):
+                tuketim = df.iloc[i]['tuketim']
+                month = df.iloc[i]['tarih'].month
+                
+                if i >= 3:
+                    prev_3_avg = df.iloc[i-3:i]['tuketim'].mean()
+                else:
+                    prev_3_avg = tuketim
+                
+                features.append([tuketim, month, prev_3_avg, abs(tuketim - prev_3_avg)])
+            
+            features = np.array(features)
+            clf = IsolationForest(contamination=0.1, random_state=42)
+            clf.fit(features)
+            scores = clf.decision_function(features)
+            
+            min_score = scores.min()
+            max_score = scores.max()
+            
+            if max_score > min_score:
+                normalized_score = (scores[point_idx] - min_score) / (max_score - min_score)
+                return 1 - normalized_score
             
             return 0
         except:
             return 0
-    
-    def _check_trend_change(self, before_df, after_df):
-        """Trend değişimi kontrolü"""
-        if len(before_df) < 3 or len(after_df) < 3:
-            return False
-        
-        try:
-            # Önceki trend
-            before_sorted = before_df.sort_values('tarih')
-            x_before = np.arange(len(before_sorted))
-            y_before = before_sorted['tuketim'].values
-            coeffs_before = np.polyfit(x_before, y_before, 1)
-            slope_before = coeffs_before[0]
-            
-            # Sonraki trend
-            after_sorted = after_df.sort_values('tarih')
-            x_after = np.arange(len(after_sorted))
-            y_after = after_sorted['tuketim'].values
-            coeffs_after = np.polyfit(x_after, y_after, 1)
-            slope_after = coeffs_after[0]
-            
-            # Büyük trend değişimi
-            return (slope_before > 0 and slope_after < -0.05) or \
-                   (slope_before > 0.05 and slope_after < -0.05)
-        except:
-            return False
-    
-    def _check_sudden_drop_advanced(self, df, max_date):
-        """Gelişmiş ani düşüş kontrolü"""
-        try:
-            # Rekor sonrası ilk 6 ay
-            after_6months = df[df['tarih'] > max_date].head(6)
-            
-            if len(after_6months) < 3:
-                return False
-            
-            # Rekor değeri
-            max_value = df[df['tarih'] == max_date]['tuketim'].iloc[0]
-            
-            if max_value <= 0:
-                return False
-            
-            # Rekor öncesi 6 ay
-            before_6months = df[df['tarih'] < max_date].tail(6)
-            if len(before_6months) >= 3:
-                avg_before = before_6months['tuketim'].mean()
-            else:
-                avg_before = max_value
-            
-            # Sonrası ortalama
-            avg_after = after_6months['tuketim'].mean()
-            
-            # Düşüş oranı
-            if avg_before > 0:
-                drop_rate = ((avg_after - avg_before) / avg_before) * 100
-                return drop_rate < -40
-            
-            return False
-        except:
-            return False
 
-# ==================== STREAMLIT ARAYÜZÜ ====================
-
+# STREAMLIT ARAYÜZÜ
 st.set_page_config(page_title="Gaz Sayacı Manipülasyon Tespiti", layout="wide", page_icon="🔥")
-
-st.title("🔥 Gaz Sayacı Manipülasyon Tespit Sistemi (Geliştirilmiş)")
+st.title("🔥 Gaz Sayacı Manipülasyon Tespit Sistemi - Hibrit")
 st.markdown("---")
 
-# Sidebar
 with st.sidebar:
     st.header("📊 Veri Yükleme")
     uploaded_file = st.file_uploader("Excel dosyanızı yükleyin", type=['xlsx', 'xls'])
     
     st.markdown("---")
     st.markdown("### 📋 Gerekli Kolonlar:")
-    st.code("""
-    - tesisat_no
-    - bina_no
-    - tarih (YYYY-MM-DD)
-    - tuketim
-    """)
+    st.code("tesisat_no\nbina_no\ntarih\ntuketim")
     
     st.markdown("---")
-    st.info("🆕 **Gelişmiş Özellikler:**\n- Rekor ilk aylarda olsa bile tespit\n- Çoklu rekor analizi\n- Peak detection algoritması")
+    st.info("🆕 **Hibrit Özellikler:**\n- 6 kriter analizi\n- ML anomali tespiti\n- Dinamik puanlama")
+    
+    st.markdown("---")
+    st.markdown("### ⚙️ Ayarlar")
+    min_suspicion = st.slider("Yüksek Risk Eşiği", 50, 80, 60)
+    min_suspicion_medium = st.slider("Orta Risk Eşiği", 20, 50, 35)
 
-# Ana içerik
 if uploaded_file is not None:
     try:
-        # Veriyi yükle
         df = pd.read_excel(uploaded_file)
         
-        # Kolon kontrolü
         required_columns = ['tesisat_no', 'bina_no', 'tarih', 'tuketim']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
             st.error(f"❌ Eksik kolonlar: {', '.join(missing_columns)}")
-            st.warning("📋 Excel dosyanızdaki kolonlar:")
-            st.code(", ".join(df.columns.tolist()))
-            st.info("💡 Lütfen Excel dosyanızdaki kolon isimlerini şu şekilde düzenleyin: tesisat_no, bina_no, tarih, tuketim")
             st.stop()
         
         df['tarih'] = pd.to_datetime(df['tarih'])
+        st.success(f"✅ Veri yüklendi! {len(df)} kayıt")
         
-        st.success(f"✅ Veri başarıyla yüklendi! Toplam {len(df)} kayıt")
-        
-        # Genel istatistikler
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Toplam Tesisat", df['tesisat_no'].nunique())
@@ -381,30 +362,33 @@ if uploaded_file is not None:
         
         st.markdown("---")
         
-        # Analiz butonu
-        if st.button("🔍 Gelişmiş Manipülasyon Analizi Başlat", type="primary"):
-            analyzer = GazSayacAnalizGelistirilmis()
+        if st.button("🔍 Hibrit Analiz Başlat", type="primary"):
+            analyzer = GazSayacHibritAnaliz()
             
-            with st.spinner("Gelişmiş analiz yapılıyor..."):
+            with st.spinner("Analiz yapılıyor..."):
                 results = []
                 tesisat_list = df['tesisat_no'].unique()
-                
                 progress_bar = st.progress(0)
+                
                 for i, tesisat_no in enumerate(tesisat_list):
-                    result = analyzer.detect_manipulation_advanced(df, tesisat_no)
+                    result = analyzer.detect_manipulation_hybrid(df, tesisat_no)
                     if result:
+                        if result['süphe_puani'] >= min_suspicion:
+                            result['manipulasyon_olasiligi'] = 'YÜKSEK'
+                        elif result['süphe_puani'] >= min_suspicion_medium:
+                            result['manipulasyon_olasiligi'] = 'ORTA'
+                        else:
+                            result['manipulasyon_olasiligi'] = 'DÜŞÜK'
                         results.append(result)
                     progress_bar.progress((i + 1) / len(tesisat_list))
                 
                 results_df = pd.DataFrame(results)
             
-            st.success(f"✅ Analiz tamamlandı! {len(results_df)} tesisat analiz edildi.")
+            st.success(f"✅ Analiz tamamlandı! {len(results_df)} tesisat")
             
-            # Sonuçlar
             st.markdown("---")
-            st.header("📈 Analiz Sonuçları")
+            st.header("📈 Sonuçlar")
             
-            # Özet kartlar
             col1, col2, col3 = st.columns(3)
             with col1:
                 yuksek = len(results_df[results_df['manipulasyon_olasiligi'] == 'YÜKSEK'])
@@ -419,11 +403,9 @@ if uploaded_file is not None:
                 st.metric("🟢 Düşük Risk", dusuk,
                          delta=f"%{(dusuk/len(results_df)*100):.1f}" if len(results_df) > 0 else "0%")
             
-            # Grafikler
             col1, col2 = st.columns(2)
             
             with col1:
-                # Risk dağılımı
                 fig1 = px.pie(results_df, names='manipulasyon_olasiligi', 
                              title='Risk Dağılımı',
                              color='manipulasyon_olasiligi',
@@ -431,122 +413,126 @@ if uploaded_file is not None:
                 st.plotly_chart(fig1, use_container_width=True)
             
             with col2:
-                # Şüphe puanı dağılımı
                 fig2 = px.histogram(results_df, x='süphe_puani', 
-                                   title='Şüphe Puanı Dağılımı',
-                                   nbins=20,
+                                   title='Şüphe Puanı Dağılımı', nbins=20,
                                    color='manipulasyon_olasiligi',
                                    color_discrete_map={'YÜKSEK': '#ff4444', 'ORTA': '#ffaa00', 'DÜŞÜK': '#44ff44'})
                 st.plotly_chart(fig2, use_container_width=True)
             
-            # Detaylı sonuçlar tablosu
             st.markdown("---")
             st.subheader("🔍 Detaylı Sonuçlar")
             
-            # Filtreleme
-            risk_filter = st.multiselect("Risk Seviyesi Filtrele:", 
+            risk_filter = st.multiselect("Risk Filtrele:", 
                                         ['YÜKSEK', 'ORTA', 'DÜŞÜK'],
                                         default=['YÜKSEK', 'ORTA'])
             
             filtered_df = results_df[results_df['manipulasyon_olasiligi'].isin(risk_filter)]
             filtered_df = filtered_df.sort_values('süphe_puani', ascending=False)
             
-            # Tabloyu göster
             display_df = filtered_df[['tesisat_no', 'bina_no', 'rekor_tarihi', 'rekor_degeri', 
-                                     'süphe_puani', 'manipulasyon_olasiligi', 'degisim_yuzdesi', 'not']].copy()
+                                     'süphe_puani', 'manipulasyon_olasiligi', 
+                                     'ortalama_oncesi', 'ortalama_sonrasi']].copy()
             display_df['rekor_tarihi'] = display_df['rekor_tarihi'].dt.strftime('%Y-%m-%d')
-            display_df['degisim_yuzdesi'] = display_df['degisim_yuzdesi'].round(2)
             
             st.dataframe(display_df, use_container_width=True, height=400)
             
-            # İndirme butonu - Excel formatında
             from io import BytesIO
             buffer = BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                filtered_df.to_excel(writer, index=False, sheet_name='Analiz Sonuçları')
+                filtered_df.to_excel(writer, index=False, sheet_name='Sonuçlar')
             buffer.seek(0)
             
             st.download_button(
-                label="📥 Sonuçları İndir (Excel)",
+                label="📥 Excel İndir",
                 data=buffer,
-                file_name=f"manipulasyon_analizi_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                file_name=f"hibrit_analiz_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-            # Detaylı tesisat analizi
-            st.markdown("---")
-            st.subheader("🔬 Tesisat Detay Analizi")
-            
             if len(filtered_df) > 0:
-                selected_tesisat = st.selectbox("Detay görmek için tesisat seçin:", 
-                                               filtered_df['tesisat_no'].tolist())
+                st.markdown("---")
+                st.subheader("🔬 Tesisat Detayı")
+                
+                selected_tesisat = st.selectbox("Tesisat Seçin:", filtered_df['tesisat_no'].tolist())
                 
                 if selected_tesisat:
                     tesisat_data = df[df['tesisat_no'] == selected_tesisat].sort_values('tarih')
-                    
-                    # Tüketim grafiği
-                    fig3 = go.Figure()
-                    fig3.add_trace(go.Scatter(x=tesisat_data['tarih'], y=tesisat_data['tuketim'],
-                                             mode='lines+markers', name='Tüketim',
-                                             line=dict(color='blue', width=2)))
-                    
-                    # Rekor noktası
                     result = filtered_df[filtered_df['tesisat_no'] == selected_tesisat].iloc[0]
-                    fig3.add_vline(x=result['rekor_tarihi'], line_dash="dash", 
-                                  line_color="red", annotation_text="Rekor Tarih")
                     
-                    fig3.update_layout(title=f"Tesisat {selected_tesisat} - Tüketim Grafiği",
-                                      xaxis_title="Tarih", yaxis_title="Tüketim (m³)")
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Scatter(
+                        x=tesisat_data['tarih'], 
+                        y=tesisat_data['tuketim'],
+                        mode='lines+markers', 
+                        name='Tüketim',
+                        line=dict(color='blue', width=2)
+                    ))
+                    
+                    fig3.add_vline(x=result['rekor_tarihi'], line_dash="dash", 
+                                  line_color="red", annotation_text="Rekor")
+                    
+                    fig3.update_layout(
+                        title=f"Tesisat {selected_tesisat}",
+                        xaxis_title="Tarih", 
+                        yaxis_title="Tüketim"
+                    )
                     st.plotly_chart(fig3, use_container_width=True)
                     
-                    # Detay bilgiler
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("Şüphe Puanı", f"{result['süphe_puani']}/100")
                     with col2:
-                        st.metric("Değişim", f"{result['degisim_yuzdesi']:.1f}%")
+                        st.metric("Risk", result['manipulasyon_olasiligi'])
                     with col3:
-                        st.metric("Risk Seviyesi", result['manipulasyon_olasiligi'])
+                        degisim = ((result['ortalama_sonrasi'] - result['ortalama_oncesi']) / 
+                                  result['ortalama_oncesi'] * 100) if result['ortalama_oncesi'] > 0 else 0
+                        st.metric("Değişim", f"{degisim:.1f}%")
                     with col4:
-                        st.metric("Analiz Tipi", result['not'])
+                        st.metric("Analiz Ayları", result['analiz_edilen_aylar'])
+                    
+                    if 'analiz_detaylari' in result:
+                        st.markdown("### 📊 Kriter Detayları")
+                        detaylar = result['analiz_detaylari']
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            if 'rekor_orani' in detaylar:
+                                st.metric("Rekor Oranı", f"{detaylar['rekor_orani']}x")
+                            if 'ilk_3_ay_dusus' in detaylar:
+                                st.metric("İlk 3 Ay Düşüş", f"{detaylar['ilk_3_ay_dusus']:.1f}%")
+                        
+                        with col2:
+                            if 'mevsimsel_uyumsuzluk' in detaylar:
+                                st.metric("Mevsimsel Uyumsuzluk", f"{detaylar['mevsimsel_uyumsuzluk']:.1f}%")
+                            if 'trend_degisimi' in detaylar:
+                                st.metric("Trend Değişimi", detaylar['trend_degisimi'])
+                        
+                        with col3:
+                            if 'varyans_degisimi' in detaylar:
+                                st.metric("Varyans Değişimi", f"{detaylar['varyans_degisimi']:.1f}%")
+                            if 'ml_anomali_skoru' in detaylar:
+                                st.metric("ML Anomali", f"{detaylar['ml_anomali_skoru']:.2f}")
         
     except Exception as e:
-        st.error(f"❌ Hata oluştu: {str(e)}")
-        st.info("Lütfen Excel dosyanızın doğru formatta olduğundan emin olun.")
+        st.error(f"❌ Hata: {str(e)}")
+        st.info("Excel dosyanızın formatını kontrol edin.")
 
 else:
-    # Başlangıç ekranı
-    st.info("👈 Lütfen soldaki menüden Excel dosyanızı yükleyin")
+    st.info("👈 Sol menüden Excel dosyanızı yükleyin")
     
-    st.markdown("### 📖 Kullanım Talimatları:")
+    st.markdown("### 📖 Kullanım")
     st.markdown("""
-    1. **Veri Hazırlığı**: Excel dosyanız şu kolonları içermeli:
-       - `tesisat_no`: Tesisat numarası
-       - `bina_no`: Bina numarası
-       - `tarih`: Tarih (YYYY-MM-DD formatında)
-       - `tuketim`: Tüketim değeri (m³)
-    
-    2. **Yükleme**: Sol menüden "Browse files" butonuna tıklayıp Excel dosyanızı seçin
-    
-    3. **Analiz**: "Gelişmiş Manipülasyon Analizi Başlat" butonuna tıklayın
-    
-    4. **Sonuçlar**: Risk seviyelerine göre filtreleme yapabilir ve Excel olarak indirebilirsiniz
+    1. Excel dosyanız şu kolonları içermeli: `tesisat_no`, `bina_no`, `tarih`, `tuketim`
+    2. Sol menüden dosyayı yükleyin
+    3. "Hibrit Analiz Başlat" butonuna tıklayın
+    4. Sonuçları Excel olarak indirin
     """)
     
-    st.markdown("### 🆕 Gelişmiş Özellikler:")
-    st.markdown("""
-    - **Rekor ilk aylarda**: Rekor ilk 3 ay içinde bile olsa tespit edilir
-    - **Çoklu peak analizi**: Birden fazla şüpheli rekor tespit edilir
-    - **Peak detection**: Bilimsel algoritma ile anormal tüketim tespiti
-    - **Esnek analiz**: Minimum 12 ay veri ile çalışır
-    """)
-    
-    # Örnek veri formatı
-    st.markdown("### 📊 Örnek Veri Formatı:")
+    st.markdown("### 📊 Örnek Format")
     example_data = pd.DataFrame({
-        'tesisat_no': ['T001', 'T001', 'T001', 'T002', 'T002'],
-        'bina_no': ['B001', 'B001', 'B001', 'B002', 'B002'],
-        'tarih': ['2023-01-15', '2023-02-15', '2023-03-15', '2023-01-15', '2023-02-15'],
-        'tuketim': [120, 135, 98, 145, 150]
+        'tesisat_no': ['T001', 'T001', 'T001'],
+        'bina_no': ['B001', 'B001', 'B001'],
+        'tarih': ['2023-01-15', '2023-02-15', '2023-03-15'],
+        'tuketim': [120, 135, 98]
     })
     st.dataframe(example_data, use_container_width=True)
